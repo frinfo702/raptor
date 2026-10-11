@@ -1,0 +1,520 @@
+//! A Block is one terminal pane hosted by the rex server: a child process
+//! attached to a pty, and the ghostty-vt Terminal that parses its output.
+//!
+//! Blocks never own a thread. Every block is driven by the one libxev loop
+//! that owns the server, and all blocks on a loop share one read buffer.
+//! The terminal answers queries (DA, DSR, ...) itself by writing back to the
+//! pty, so replies happen even when no client is attached. Everything else
+//! the program does that a client might show (title, bell, clipboard, ...)
+//! is reported through `Options.on_event`.
+const Block = @This();
+
+const std = @import("std");
+const builtin = @import("builtin");
+const posix = std.posix;
+const Allocator = std.mem.Allocator;
+const EnvMap = std.process.Environ.Map;
+const global = @import("../global.zig");
+const xev = global.xev;
+const Command = @import("../Command.zig");
+const Pty = @import("../pty.zig").Pty;
+const terminal = @import("../terminal/main.zig");
+
+const log = std.log.scoped(.rex_block);
+
+/// The buffer every block on a loop reads its pty into. One read is at most
+/// this large, so a busy block yields to the others after each read.
+///
+/// Sharing it is safe because libxev's kqueue backend performs each read
+/// and runs its callback before it performs the next one.
+// ponytail: io_uring runs reads concurrently, so a Linux server using it
+// needs a buffer per block or readiness-based reads.
+pub const ReadBuffer = [64 * 1024]u8;
+
+/// The default scrollback limit, sized to hold at least 10,000 lines of
+/// history at 80 columns. One 400 KiB page holds about 600 rows there, and
+/// only whole pages are pruned. Wider terminals keep fewer lines.
+pub const default_max_scrollback_bytes = 8 * 1000 * 1000;
+
+pub const Options = struct {
+    /// The command to run. args[0] is the program and must be a path.
+    args: []const [:0]const u8,
+
+    /// The exact environment of the child. Null inherits ours.
+    env: ?*const EnvMap = null,
+
+    /// The working directory of the child. Null inherits ours.
+    cwd: ?[:0]const u8 = null,
+
+    cols: terminal.size.CellCountInt = 80,
+    rows: terminal.size.CellCountInt = 24,
+
+    /// Uncompressed bytes of scrollback to keep. Zero disables scrollback.
+    max_scrollback_bytes: usize = default_max_scrollback_bytes,
+
+    /// Receives every event. It runs on the loop thread and must not
+    /// destroy the block.
+    on_event: *const fn (*Block, Event) void,
+
+    /// Stored on the block for `on_event` to use.
+    userdata: ?*anyopaque = null,
+};
+
+/// Everything a block reports. Slices are only valid during the callback.
+pub const Event = union(enum) {
+    /// Bytes read from the pty, after the terminal has processed them.
+    output: []const u8,
+
+    /// A reply the terminal sent to the program (e.g. to a DA query).
+    /// The block has already queued it to the pty.
+    write_pty: []const u8,
+
+    /// The new title, empty if the program cleared it.
+    title_changed: []const u8,
+
+    /// The new working directory (OSC 7), empty if cleared.
+    pwd_changed: []const u8,
+
+    bell,
+    desktop_notification: terminal.StreamAction.ShowDesktopNotification,
+    progress_report: terminal.osc.Command.ProgressReport,
+    clipboard_write: terminal.clipboard.Write,
+    program_status: terminal.osc.Command.ProgramStatus.Report,
+
+    /// The child exited with this status. All output the child wrote
+    /// before exiting has been reported first.
+    child_exited: ChildExited,
+
+    pub const ChildExited = struct {
+        // ponytail: libxev reaps the child itself and reports 0 for a
+        // child killed by a signal; report the signal when a client needs it.
+        exit_code: u32,
+    };
+};
+
+alloc: Allocator,
+loop: *xev.Loop,
+read_buf: *ReadBuffer,
+on_event: *const fn (*Block, Event) void,
+userdata: ?*anyopaque,
+
+pty: Pty,
+pty_stream: xev.Stream,
+pid: posix.pid_t,
+process: xev.Process,
+term: terminal.Terminal,
+vt: terminal.TerminalStream,
+
+/// Completions still registered with the loop. The block may be destroyed
+/// only once this is zero.
+pending: usize = 0,
+exited: bool = false,
+
+read_c: xev.Completion = .{},
+process_c: xev.Completion = .{},
+write_queue: xev.WriteQueue = .{},
+
+/// One queued pty write. libxev needs the request and the bytes to stay
+/// put until the write completes, so each write gets its own allocation.
+const Write = struct {
+    block: *Block,
+    req: xev.WriteRequest = undefined,
+    data: []u8,
+};
+
+/// Start the command on a new pty and begin reading it on `loop`.
+pub fn create(
+    alloc: Allocator,
+    loop: *xev.Loop,
+    read_buf: *ReadBuffer,
+    opts: Options,
+) !*Block {
+    const self = try alloc.create(Block);
+    errdefer alloc.destroy(self);
+
+    var term: terminal.Terminal = try .init(global.io(), alloc, .{
+        .cols = opts.cols,
+        .rows = opts.rows,
+        .max_scrollback_bytes = opts.max_scrollback_bytes,
+    });
+    errdefer term.deinit(alloc);
+
+    var pty = try Pty.open(.{ .ws_col = opts.cols, .ws_row = opts.rows });
+    errdefer pty.deinit();
+    // The child has its own copy of the slave. Ours must be closed so that
+    // reads see the pty close once the child and its descendants exit.
+    defer _ = posix.system.close(pty.slave);
+
+    const slave: std.Io.File = .{ .handle = pty.slave, .flags = .{ .nonblocking = false } };
+    var cmd: Command = .{
+        .path = opts.args[0],
+        .args = opts.args,
+        .env = opts.env,
+        .cwd = opts.cwd,
+        .stdin = slave,
+        .stdout = slave,
+        .stderr = slave,
+        .os_pre_exec = childPreExec,
+        .rt_pre_exec = null,
+        .rt_post_fork = null,
+        .rt_pre_exec_info = undefined,
+        .rt_post_fork_info = undefined,
+        .data = &pty,
+    };
+    cmd.start(alloc) catch |err| {
+        // We're the forked child and exec failed. Command already printed
+        // why, and we must not return into the caller's copy of the server.
+        if (err == error.ExecFailedInChild) posix.system.exit(1);
+        return err;
+    };
+
+    self.* = .{
+        .alloc = alloc,
+        .loop = loop,
+        .read_buf = read_buf,
+        .on_event = opts.on_event,
+        .userdata = opts.userdata,
+        .pty = pty,
+        .pty_stream = .initFd(pty.master),
+        .pid = cmd.pid.?,
+        .process = undefined,
+        .term = term,
+        .vt = undefined,
+    };
+
+    // The handler points at the terminal, so it's built in place.
+    var handler = self.term.vtHandler();
+    handler.effects.write_pty = &writePty;
+    handler.effects.bell = &bell;
+    handler.effects.desktop_notification = &desktopNotification;
+    handler.effects.device_attributes = &deviceAttributes;
+    handler.effects.title_changed = &titleChanged;
+    handler.effects.pwd_changed = &pwdChanged;
+    handler.effects.progress_report = &progressReport;
+    handler.effects.program_status = &programStatus;
+    handler.effects.clipboard_write = &clipboardWrite;
+    self.vt = .init(.{ .allocator = alloc, .handler = handler });
+    errdefer self.vt.deinit();
+
+    self.process = xev.Process.init(self.pid) catch |err| {
+        posix.kill(-self.pid, .KILL) catch {};
+        var status: if (builtin.link_libc) c_int else u32 = 0;
+        _ = posix.system.waitpid(self.pid, &status, 0);
+        return err;
+    };
+    self.process.wait(loop, &self.process_c, Block, self, onExit);
+    self.pty_stream.read(loop, &self.read_c, .{ .slice = read_buf }, Block, self, onRead);
+    self.pending = 2;
+
+    return self;
+}
+
+/// Free the block. The child must have exited and the pty must be
+/// closed, i.e. `isDone()`; call `kill()` and run the loop to get there.
+pub fn destroy(self: *Block) void {
+    std.debug.assert(self.isDone());
+    const alloc = self.alloc;
+    self.process.deinit();
+    self.vt.deinit();
+    self.term.deinit(alloc);
+    self.pty.deinit();
+    alloc.destroy(self);
+}
+
+/// True once nothing for this block is left on the loop.
+pub fn isDone(self: *const Block) bool {
+    return self.pending == 0;
+}
+
+/// Hang up the child's process group, as closing a pane does. The exit
+/// arrives later as `child_exited`.
+pub fn kill(self: *Block) void {
+    if (self.exited) return;
+    // The child called setsid, so its process group id is its pid.
+    posix.kill(-self.pid, .HUP) catch |err| log.warn("killing child failed err={}", .{err});
+}
+
+/// Queue bytes to the program's input.
+pub fn write(self: *Block, data: []const u8) Allocator.Error!void {
+    if (data.len == 0) return;
+    const w = try self.alloc.create(Write);
+    errdefer self.alloc.destroy(w);
+    w.* = .{ .block = self, .data = try self.alloc.dupe(u8, data) };
+    self.pty_stream.queueWrite(
+        self.loop,
+        &self.write_queue,
+        &w.req,
+        .{ .slice = w.data },
+        Write,
+        w,
+        onWrite,
+    );
+    self.pending += 1;
+}
+
+/// Run bytes through the terminal as if the program had written them.
+pub fn processOutput(self: *Block, data: []const u8) void {
+    self.vt.nextSlice(data);
+    self.emit(.{ .output = data });
+}
+
+fn emit(self: *Block, event: Event) void {
+    self.on_event(self, event);
+}
+
+/// Runs in the forked child, before exec.
+fn childPreExec(cmd: *Command) ?u8 {
+    const pty = cmd.getData(Pty).?;
+    pty.childPreExec() catch |err| log.err("error initializing child: {}", .{err});
+    return null;
+}
+
+fn onRead(
+    self_: ?*Block,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    _: xev.Stream,
+    buf: xev.ReadBuffer,
+    r: xev.ReadError!usize,
+) xev.CallbackAction {
+    const self = self_.?;
+    const n = r catch |err| {
+        // EOF, or EIO on macOS: every holder of the slave has closed it.
+        if (err != error.EOF) log.debug("pty read ended err={}", .{err});
+        self.pending -= 1;
+        return .disarm;
+    };
+    self.processOutput(buf.slice[0..n]);
+    return .rearm;
+}
+
+fn onExit(
+    self_: ?*Block,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Process.WaitError!u32,
+) xev.CallbackAction {
+    const self = self_.?;
+    self.pending -= 1;
+    self.exited = true;
+    const exit_code = r catch |err| code: {
+        // kqueue can't watch a child that exited before the loop
+        // registered the watch, so reap it here instead.
+        var status: if (builtin.link_libc) c_int else u32 = 0;
+        if (posix.system.waitpid(self.pid, &status, 0) == self.pid) {
+            switch (Command.Exit.init(@bitCast(status))) {
+                .Exited => |v| break :code v,
+                else => break :code 0,
+            }
+        }
+        log.warn("waiting for child failed err={}", .{err});
+        break :code 1;
+    };
+
+    // The exit can be seen before the output the child wrote just before
+    // it. Read what is already in the pty so the exit is reported last. A
+    // pty buffers far less than one read, so one read gets all of it.
+    var pfd = [_]posix.pollfd{.{ .fd = self.pty.master, .events = posix.POLL.IN, .revents = 0 }};
+    if ((posix.poll(&pfd, 0) catch 0) > 0 and pfd[0].revents & posix.POLL.IN != 0) {
+        if (posix.read(self.pty.master, self.read_buf)) |n| {
+            self.processOutput(self.read_buf[0..n]);
+        } else |_| {}
+    }
+
+    self.emit(.{ .child_exited = .{ .exit_code = exit_code } });
+    return .disarm;
+}
+
+fn onWrite(
+    w_: ?*Write,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    _: xev.Stream,
+    _: xev.WriteBuffer,
+    r: xev.WriteError!usize,
+) xev.CallbackAction {
+    const w = w_.?;
+    const self = w.block;
+    _ = r catch |err| log.warn("pty write failed err={}", .{err});
+    self.pending -= 1;
+    self.alloc.free(w.data);
+    self.alloc.destroy(w);
+    return .disarm;
+}
+
+fn fromHandler(handler: *terminal.TerminalStream.Handler) *Block {
+    const vt: *terminal.TerminalStream = @fieldParentPtr("handler", handler);
+    return @fieldParentPtr("vt", vt);
+}
+
+fn writePty(handler: *terminal.TerminalStream.Handler, data: []const u8) void {
+    const self = fromHandler(handler);
+    self.write(data) catch |err| {
+        log.warn("dropping pty reply err={}", .{err});
+        return;
+    };
+    self.emit(.{ .write_pty = data });
+}
+
+fn bell(handler: *terminal.TerminalStream.Handler) void {
+    fromHandler(handler).emit(.bell);
+}
+
+fn desktopNotification(
+    handler: *terminal.TerminalStream.Handler,
+    n: terminal.StreamAction.ShowDesktopNotification,
+) void {
+    fromHandler(handler).emit(.{ .desktop_notification = n });
+}
+
+fn deviceAttributes(_: *terminal.TerminalStream.Handler) terminal.device_attributes.Attributes {
+    return .{};
+}
+
+fn titleChanged(handler: *terminal.TerminalStream.Handler) void {
+    const self = fromHandler(handler);
+    self.emit(.{ .title_changed = self.term.getTitle() orelse "" });
+}
+
+fn pwdChanged(handler: *terminal.TerminalStream.Handler) void {
+    const self = fromHandler(handler);
+    self.emit(.{ .pwd_changed = self.term.getPwd() orelse "" });
+}
+
+fn progressReport(
+    handler: *terminal.TerminalStream.Handler,
+    report: terminal.osc.Command.ProgressReport,
+) void {
+    fromHandler(handler).emit(.{ .progress_report = report });
+}
+
+fn programStatus(
+    handler: *terminal.TerminalStream.Handler,
+    report: terminal.osc.Command.ProgramStatus.Report,
+) void {
+    fromHandler(handler).emit(.{ .program_status = report });
+}
+
+fn clipboardWrite(
+    handler: *terminal.TerminalStream.Handler,
+    w: terminal.clipboard.Write,
+) void {
+    fromHandler(handler).emit(.{ .clipboard_write = w });
+}
+
+test "rex Block: title, output, DA reply, and exit" {
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const Recorder = struct {
+        title: ?[]u8 = null,
+        output: std.ArrayList(u8) = .empty,
+        exit_code: ?u32 = null,
+
+        fn onEvent(block: *Block, event: Event) void {
+            const r: *@This() = @ptrCast(@alignCast(block.userdata.?));
+            switch (event) {
+                .title_changed => |t| {
+                    if (r.title) |old| alloc.free(old);
+                    r.title = alloc.dupe(u8, t) catch @panic("OOM");
+                },
+                .output => |b| r.output.appendSlice(alloc, b) catch @panic("OOM"),
+                .child_exited => |e| r.exit_code = e.exit_code,
+                else => {},
+            }
+        }
+    };
+    var rec: Recorder = .{};
+    defer {
+        if (rec.title) |t| alloc.free(t);
+        rec.output.deinit(alloc);
+    }
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+    var read_buf: ReadBuffer = undefined;
+
+    const block = try Block.create(alloc, &loop, &read_buf, .{
+        .args = &.{ "/bin/sh", "-c", "printf '\\033]0;hello\\007'; echo hi; read -r x; echo \"got:$x\"" },
+        .on_event = &Recorder.onEvent,
+        .userdata = &rec,
+    });
+    defer block.destroy();
+
+    // The DA query makes the terminal reply to the child, which reads the
+    // reply as its line once the newline follows.
+    block.processOutput("\x1b[c");
+    try block.write("\n");
+
+    // Hang up the child rather than hang the test if it never finishes.
+    var timer = try xev.Timer.init();
+    defer timer.deinit();
+    var timer_c: xev.Completion = .{};
+    var cancel_c: xev.Completion = .{};
+    timer.run(&loop, &timer_c, 10_000, Block, block, (struct {
+        fn cb(b: ?*Block, _: *xev.Loop, _: *xev.Completion, r: xev.Timer.RunError!void) xev.CallbackAction {
+            _ = r catch return .disarm;
+            b.?.kill();
+            return .disarm;
+        }
+    }).cb);
+    while (!block.isDone()) try loop.run(.once);
+    timer.cancel(&loop, &timer_c, &cancel_c, void, null, (struct {
+        fn cb(_: ?*void, _: *xev.Loop, _: *xev.Completion, _: xev.Timer.CancelError!void) xev.CallbackAction {
+            return .disarm;
+        }
+    }).cb);
+    try loop.run(.until_done);
+
+    try testing.expectEqualStrings("hello", rec.title.?);
+    try testing.expectEqual(@as(?u32, 0), rec.exit_code);
+    try testing.expect(std.mem.indexOf(u8, rec.output.items, "got:\x1b[?") != null);
+
+    const plain = try block.term.plainString(alloc);
+    defer alloc.free(plain);
+    try testing.expect(std.mem.indexOf(u8, plain, "hi") != null);
+}
+
+test "rex Block: exit status of a child that exits before the loop runs" {
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const testing = std.testing;
+
+    const Recorder = struct {
+        fn onEvent(block: *Block, event: Event) void {
+            if (event == .child_exited) {
+                const code: *?u32 = @ptrCast(@alignCast(block.userdata.?));
+                code.* = event.child_exited.exit_code;
+            }
+        }
+    };
+    var exit_code: ?u32 = null;
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+    var read_buf: ReadBuffer = undefined;
+
+    const block = try Block.create(testing.allocator, &loop, &read_buf, .{
+        .args = &.{ "/bin/sh", "-c", "exit 3" },
+        .on_event = &Recorder.onEvent,
+        .userdata = &exit_code,
+    });
+    defer block.destroy();
+
+    try std.Io.sleep(testing.io, .fromMilliseconds(200), .awake);
+    try loop.run(.until_done);
+    try testing.expectEqual(@as(?u32, 3), exit_code);
+}
+
+test "rex Block: default scrollback keeps 10,000 lines at 80 columns" {
+    const testing = std.testing;
+    var pages: terminal.PageList = try .init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_size = default_max_scrollback_bytes,
+    });
+    defer pages.deinit();
+
+    for (0..12_000) |_| _ = try pages.grow();
+    try testing.expect(pages.total_rows >= 10_000 + pages.rows);
+}
