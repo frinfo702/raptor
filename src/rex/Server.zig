@@ -851,8 +851,9 @@ fn handleFrame(self: *Server, cl: *Client, payload: []const u8) void {
     self.respond(cl, id, out.written());
 }
 
-/// Find one item by full id, then label, then 1-based position, then an
-/// id suffix of at least 4 characters.
+/// Find one item by full id, then label, then 1-based position (except
+/// for blocks, whose positions count within a window), then an id suffix
+/// of at least 4 characters.
 fn match(
     comptime T: type,
     comptime kind: []const u8,
@@ -872,9 +873,11 @@ fn match(
     if (n == 1) return found.?;
     if (n > 1) return req.fail(error.Target, "{s} '{s}' is ambiguous", .{ kind, query });
 
-    if (std.fmt.parseInt(usize, query, 10)) |pos| {
-        if (pos >= 1 and pos <= items.len) return items[pos - 1];
-    } else |_| {}
+    if (comptime !std.mem.eql(u8, kind, "block")) {
+        if (std.fmt.parseInt(usize, query, 10)) |pos| {
+            if (pos >= 1 and pos <= items.len) return items[pos - 1];
+        } else |_| {}
+    }
 
     if (bare.len >= 4) {
         for (items) |it| if (std.mem.endsWith(u8, &it.id, bare)) {
@@ -931,6 +934,7 @@ fn resolve(self: *Server, req: *Request) Error!Target {
         const in_window = try w.tree.leaves(req.arena);
         if (std.fmt.parseInt(usize, q, 10)) |pos| {
             if (pos >= 1 and pos <= in_window.len) break :pane in_window[pos - 1];
+            return req.fail(error.Target, "no block {s} in that window", .{q});
         } else |_| {}
         const pane = try match(Pane, "block", try sessionPanes(s, req.arena), q, req);
         if (req.str("window") != null and pane.window != w)
@@ -1400,6 +1404,17 @@ test "rex Server: sessions over the socket" {
     defer alloc.free(view);
     try testing.expect(std.mem.indexOf(u8, view, "\"type\":\"vertical\"") != null);
     try testing.expect(std.mem.indexOf(u8, view, "\"revision\":2") != null);
+
+    // Block positions count within the active window only.
+    const window = try T.call(fd,
+        \\{"id":51,"method":"session.new_window","params":{"session":"demo","command":["/bin/sh","-c","sleep 30"]}}
+    );
+    defer alloc.free(window);
+    const out_of_range = try T.call(fd,
+        \\{"id":52,"method":"block.method","params":{"session":"demo","block":"2","method":"size"}}
+    );
+    defer alloc.free(out_of_range);
+    try testing.expect(std.mem.indexOf(u8, out_of_range, "\"code\":\"target\"") != null);
 
     const killed = try T.call(fd,
         \\{"id":6,"method":"session.kill","params":{"session":"demo"}}

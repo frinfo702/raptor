@@ -94,6 +94,10 @@ block=$("$RAP" split -s demo --down -- /bin/sh -c 'echo split-ok; sleep 30')
 "$RAP" new pos -- /bin/sh >/dev/null
 expect_status 3 "$RAP" close -b 2
 "$RAP" kill pos
+# ...and within the window, never across the session's other windows.
+win_block=$("$RAP" run -s demo -- /bin/sh -c 'sleep 30')
+expect_status 3 "$RAP" close -s demo -b 2
+"$RAP" close -b "$win_block"
 "$RAP" zoom -s demo -b "$block"
 "$RAP" focus -s demo -b 1
 "$RAP" session inspect demo | grep -q 'windows: 1' || fail "session inspect"
