@@ -754,6 +754,7 @@ fn replay(self: *Server, st: *Stream, since: u64) void {
     st.need = .none;
     var seq = since;
     for (parts) |part| if (part.len > 0) {
+        if (st.need != .none) return;
         seq += part.len;
         self.queueData(st, .out, protocol.Out{ .stream = st.id, .seq = seq }, part);
     };
