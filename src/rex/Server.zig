@@ -155,8 +155,13 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
             const dir_fd = c.open(dirz, .{ .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true });
             if (dir_fd < 0) return error.SocketDir;
             defer _ = c.close(dir_fd);
-            var st: c.Stat = undefined;
-            if (c.fstat(dir_fd, &st) != 0) return error.SocketDir;
+            // std.c has no fstat on Linux; statx is the libc replacement there.
+            var st: if (builtin.os.tag == .linux) std.os.linux.Statx else c.Stat = undefined;
+            const rc = if (builtin.os.tag == .linux)
+                c.statx(dir_fd, "", std.os.linux.AT.EMPTY_PATH, .{ .UID = true, .MODE = true }, &st)
+            else
+                c.fstat(dir_fd, &st);
+            if (rc != 0) return error.SocketDir;
             if (st.uid != c.getuid() or st.mode & 0o022 != 0) return error.SocketDirUnsafe;
         }
     }
