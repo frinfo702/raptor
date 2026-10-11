@@ -289,11 +289,11 @@ const Ctx = struct {
     };
 
     /// The target flags, defaulting to the session and block this runs in.
-    /// A block id or label is looked up in every session.
+    /// A block id or label without a window is looked up in every session.
     fn target(self: *Ctx) Target {
         const a = self.args;
         const none = a.session == null and a.window == null and a.block == null;
-        const by_name = if (a.block) |b| std.meta.isError(std.fmt.parseInt(usize, b, 10)) else false;
+        const by_name = a.window == null and (if (a.block) |b| std.meta.isError(std.fmt.parseInt(usize, b, 10)) else false);
         return .{
             .session = a.session orelse if (by_name) null else self.env.get("RAP_SESSION"),
             .window = a.window,

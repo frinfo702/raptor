@@ -69,6 +69,11 @@ wait_capture other 'block=block:'
 other_block=$("$RAP" run -s other -- /bin/sh -c 'sleep 30')
 expect_status 0 env RAP_SESSION=demo "$RAP" capture -b "$other_block"
 expect_status 0 env RAP_SESSION=demo "$RAP" block inspect "$other_block"
+# With -w, the block is looked up in that window of RAP_SESSION, even
+# though the newest session has a window 2 as well.
+demo_block=$("$RAP" run -s demo -- /bin/sh -c 'sleep 30')
+expect_status 0 env RAP_SESSION=demo "$RAP" capture -w 2 -b "$demo_block"
+"$RAP" close -b "$demo_block"
 "$RAP" kill other
 
 # Only one server per socket.
