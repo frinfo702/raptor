@@ -41,6 +41,10 @@ const kqueue = if (xev.dynamic) false else xev.backend == .kqueue;
 /// only whole pages are pruned. Wider terminals keep fewer lines.
 pub const default_max_scrollback_bytes = 8 * 1000 * 1000;
 
+/// The owner must not run the loop with `.no_wait` while any write may be
+/// in flight, including replies the terminal sends on its own (DA, DSR,
+/// ...): libxev's kqueue backend drops the removal of a write finished in
+/// that mode, and its next readiness event uses the freed write.
 pub const Options = struct {
     /// The command to run. args[0] is the program and must be a path.
     args: []const [:0]const u8,
@@ -227,9 +231,7 @@ pub fn create(
 /// Free the block. Nothing for it may be left on the loop, i.e. `isDone()`.
 /// That happens once the child has exited and either every holder of the
 /// pty slave has closed it or `kill()` stopped the read; call `kill()` and
-/// run the loop to get there. Run it with `.once` or `.until_done` while
-/// writes are queued: under `.no_wait` libxev's kqueue backend can leave a
-/// finished write registered.
+/// run the loop to get there.
 pub fn destroy(self: *Block) void {
     std.debug.assert(self.isDone());
     const alloc = self.alloc;
@@ -706,7 +708,7 @@ test "rex Block: a full reset clears the title" {
 }
 
 test "rex Block: busy blocks sharing a read buffer get only their own output" {
-    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
+    if (comptime !kqueue) return error.SkipZigTest;
     const testing = std.testing;
 
     const Recorder = struct {
