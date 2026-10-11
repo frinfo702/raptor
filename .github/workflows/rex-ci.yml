@@ -33,6 +33,18 @@ jobs:
           done
           if [ -n "$paths" ]; then zig fmt --check $paths; else echo "no Rex/rap sources yet"; fi
 
+      # Zig's TLS client fails against some hosts (e.g. gitlab.freedesktop.org),
+      # so fall back to curl; the content hash lands in the same cache entry.
+      - name: Prefetch dependencies
+        run: |
+          while IFS= read -r url; do
+            zig fetch "$url" >/dev/null 2>&1 && continue
+            echo "zig fetch failed, using curl: $url"
+            f="$RUNNER_TEMP/$(basename "${url%%\?*}")"
+            curl -fsSL --retry 3 -o "$f" "$url"
+            zig fetch "$f" >/dev/null
+          done < build.zig.zon.txt
+
       # app-runtime=none avoids GTK system deps; a filter matching no
       # tests still passes.
       - name: Test rex
