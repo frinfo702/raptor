@@ -22,9 +22,9 @@ pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
 
     var stdout_buf: [1024]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buf);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(init.io, &stdout_buf);
     var stderr_buf: [1024]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(init.io, &stderr_buf);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(init.io, &stderr_buf);
 
     const code = try run(
         if (args.len > 0) args[1..] else args,
