@@ -34,6 +34,8 @@ pub fn init(
             .omit_frame_pointer = cfg.omitFramePointer(),
             .unwind_tables = if (cfg.strip) .none else .sync,
         }),
+        // Crashes on x86_64 self-hosted on 0.15.1
+        .use_llvm = true,
     });
     exe.root_module.addImport("build_options", options);
     exe.root_module.addImport("ghostty-vt", mod.vt);
@@ -47,6 +49,8 @@ pub fn init(
             .target = cfg.baselineTarget(b.graph.io),
             .optimize = .debug,
         }),
+        // Crash on x86_64 without this
+        .use_llvm = true,
     });
     test_exe.root_module.addImport("build_options", options);
     test_exe.root_module.addImport("ghostty-vt", mod.vt);
