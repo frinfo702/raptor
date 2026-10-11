@@ -1333,12 +1333,14 @@ test "rex Server: sessions over the socket" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const dir_len = try tmp.dir.realPath(testing.io, &dir_buf);
-    const path = try std.fmt.allocPrintSentinel(alloc, "{s}/s.sock", .{dir_buf[0..dir_len]}, 0);
+    // Directly in /tmp: a socket under a deep checkout's .zig-cache can
+    // exceed sun_path (104 bytes on macOS).
+    const path = try std.fmt.allocPrintSentinel(alloc, "/tmp/rex-test-{d}.sock", .{c.getpid()}, 0);
     defer alloc.free(path);
+    const lock_path = try std.fmt.allocPrintSentinel(alloc, "{s}.lock", .{path}, 0);
+    defer alloc.free(lock_path);
+    defer _ = c.unlink(lock_path);
+    defer _ = c.unlink(path);
 
     var env: EnvMap = .init(alloc);
     defer env.deinit();
