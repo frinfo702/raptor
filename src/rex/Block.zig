@@ -371,9 +371,16 @@ fn onRead(
     return rearm(c);
 }
 
-/// EOF, or EIO on macOS: every holder of the slave has closed it.
+/// EOF, or EIO: every holder of the slave has closed it.
 fn readEnded(self: *Block, c: *xev.Completion, err: anyerror) xev.CallbackAction {
     if (err != error.EOF) log.debug("pty read ended err={}", .{err});
+    // Only kqueue needs the cancel. Elsewhere a cancel queued here is
+    // submitted before the rearmed read, misses it, and the block can be
+    // freed while the read is still in flight.
+    if (comptime !kqueue) {
+        self.endRead();
+        return .disarm;
+    }
     self.stopRead();
     return rearm(c);
 }
