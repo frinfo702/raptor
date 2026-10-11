@@ -204,6 +204,13 @@ pub fn build(b: *std.Build) !void {
         b.getInstallStep().dependOn(xcframework.step);
     }
 
+    // Raptor CLI, installed regardless of the app runtime.
+    if (config.emit_rap) {
+        const rap = buildpkg.RapExe.init(b, &config, &mod, test_filters);
+        rap.install();
+        test_step.dependOn(&rap.test_run.step);
+    }
+
     // Helpgen
     if (config.emit_helpgen) deps.help_strings.install();
 
