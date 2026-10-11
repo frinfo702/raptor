@@ -57,7 +57,7 @@ wait_capture() {
 env FOO=bar "$RAP" new demo -- /bin/sh >/dev/null || fail "rap new demo"
 "$RAP" send -s demo 'echo hi\n'
 wait_capture demo hi
-"$RAP" ls | grep -q demo || fail "rap ls does not list demo"
+"$RAP" ls | grep -Eq "^demo +1 +1 +session:" || fail "rap ls does not list demo with 1 window and 1 block"
 
 # Another client's session never sees FOO.
 "$RAP" new other -- /bin/sh >/dev/null

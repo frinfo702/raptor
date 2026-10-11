@@ -344,7 +344,8 @@ const Ctx = struct {
             const label = str(s, "label");
             try self.out.writeAll(label);
             try self.out.splatByteAll(' ', width - label.len + 2);
-            try self.out.print("{d: <7}  {d: <6}  {s}\n", .{ int(s, "windows"), int(s, "blocks"), str(s, "id") });
+            // Unsigned: Zig prints a "+" on signed ints formatted with a width.
+            try self.out.print("{d: <7}  {d: <6}  {s}\n", .{ @abs(int(s, "windows")), @abs(int(s, "blocks")), str(s, "id") });
         }
         return .ok;
     }
