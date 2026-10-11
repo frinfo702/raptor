@@ -54,6 +54,7 @@ emit_exe: bool = false,
 emit_helpgen: bool = false,
 emit_lib_vt: bool = false,
 emit_macos_app: bool = false,
+emit_rap: bool = false,
 emit_terminfo: bool = false,
 emit_termcap: bool = false,
 emit_test_exe: bool = false,
@@ -455,6 +456,15 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
         "emit-exe",
         "Build and install main executables with 'build'",
     ) orelse !config.emit_lib_vt;
+
+    config.emit_rap = b.option(
+        bool,
+        "emit-rap",
+        "Build and install the rap executable with 'build'",
+    ) orelse (!config.emit_lib_vt and switch (target.result.os.tag) {
+        .macos, .linux => true,
+        else => false,
+    });
 
     config.emit_test_exe = b.option(
         bool,
