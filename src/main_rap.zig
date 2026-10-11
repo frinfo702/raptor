@@ -1,8 +1,9 @@
 //! Entrypoint for `rap`, the Raptor command line tool.
 //!
 //! This sits at the root of `src/` so that it can import shared modules
-//! such as `pty.zig` and `Command.zig` as the tool grows.
+//! such as `pty.zig`, `Command.zig` and `ghostty-vt` as the tool grows.
 const std = @import("std");
+const vt = @import("ghostty-vt");
 const options = @import("build_options");
 const exit = @import("rap/exit.zig");
 
@@ -47,14 +48,11 @@ fn run(
     }
 
     const cmd = args[0];
-    if (std.mem.eql(u8, cmd, "version") or std.mem.eql(u8, cmd, "--version")) {
+    if (std.mem.eql(u8, cmd, "version")) {
         try stdout.print("rap {s}\n", .{options.app_version_string});
         return .ok;
     }
-    if (std.mem.eql(u8, cmd, "help") or
-        std.mem.eql(u8, cmd, "--help") or
-        std.mem.eql(u8, cmd, "-h"))
-    {
+    if (std.mem.eql(u8, cmd, "help")) {
         try stdout.writeAll(usage);
         return .ok;
     }
@@ -87,6 +85,14 @@ test "rap without a command is a usage error" {
 
 test "rap unknown command is a usage error" {
     try testRun(&.{"nope"}, .usage, "", "rap: unknown command 'nope'\n\n" ++ usage);
+}
+
+test "rap unknown flag is a usage error" {
+    try testRun(&.{"--version"}, .usage, "", "rap: unknown command '--version'\n\n" ++ usage);
+}
+
+test "rap imports ghostty-vt" {
+    std.testing.refAllDecls(vt);
 }
 
 test "rap exit codes" {

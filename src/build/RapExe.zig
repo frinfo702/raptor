@@ -5,6 +5,7 @@ const RapExe = @This();
 
 const std = @import("std");
 const Config = @import("Config.zig");
+const GhosttyZig = @import("GhosttyZig.zig");
 
 /// The rap executable.
 exe: *std.Build.Step.Compile,
@@ -18,10 +19,10 @@ test_run: *std.Build.Step.Run,
 pub fn init(
     b: *std.Build,
     cfg: *const Config,
+    mod: *const GhosttyZig,
     test_filters: []const []const u8,
-) !RapExe {
-    const options = b.addOptions();
-    try cfg.addOptions(options);
+) RapExe {
+    const options = mod.vt.import_table.get("build_options").?;
 
     const exe = b.addExecutable(.{
         .name = "rap",
@@ -34,7 +35,8 @@ pub fn init(
             .unwind_tables = if (cfg.strip) .none else .sync,
         }),
     });
-    exe.root_module.addOptions("build_options", options);
+    exe.root_module.addImport("build_options", options);
+    exe.root_module.addImport("ghostty-vt", mod.vt);
     if (cfg.pie) exe.pie = true;
 
     const test_exe = b.addTest(.{
@@ -46,7 +48,8 @@ pub fn init(
             .optimize = .debug,
         }),
     });
-    test_exe.root_module.addOptions("build_options", options);
+    test_exe.root_module.addImport("build_options", options);
+    test_exe.root_module.addImport("ghostty-vt", mod.vt);
 
     return .{
         .exe = exe,

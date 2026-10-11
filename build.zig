@@ -206,7 +206,7 @@ pub fn build(b: *std.Build) !void {
 
     // Raptor CLI, installed regardless of the app runtime.
     if (config.emit_rap) {
-        const rap = try buildpkg.RapExe.init(b, &config, test_filters);
+        const rap = buildpkg.RapExe.init(b, &config, &mod, test_filters);
         rap.install();
         test_step.dependOn(&rap.test_run.step);
     }
