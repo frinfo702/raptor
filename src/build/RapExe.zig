@@ -1,11 +1,11 @@
-//! The `rap` executable: the Raptor command line tool. Unlike the main
-//! Ghostty executable this is built regardless of the app runtime so that
-//! it is available on macOS, where the app is built by Xcode.
+//! The `rap` executable: the Raptor command line tool and server. Unlike
+//! the main Ghostty executable this is built regardless of the app runtime
+//! so that it is available on macOS, where the app is built by Xcode.
 const RapExe = @This();
 
 const std = @import("std");
 const Config = @import("Config.zig");
-const GhosttyZig = @import("GhosttyZig.zig");
+const SharedDeps = @import("SharedDeps.zig");
 
 /// The rap executable.
 exe: *std.Build.Step.Compile,
@@ -19,11 +19,9 @@ test_run: *std.Build.Step.Run,
 pub fn init(
     b: *std.Build,
     cfg: *const Config,
-    mod: *const GhosttyZig,
+    deps: *const SharedDeps,
     test_filters: []const []const u8,
-) RapExe {
-    const options = mod.vt.import_table.get("build_options").?;
-
+) !RapExe {
     const exe = b.addExecutable(.{
         .name = "rap",
         .root_module = b.createModule(.{
@@ -37,8 +35,9 @@ pub fn init(
         // Crashes on x86_64 self-hosted on 0.15.1
         .use_llvm = true,
     });
-    exe.root_module.addImport("build_options", options);
-    exe.root_module.addImport("ghostty-vt", mod.vt);
+    // The server hosts the same terminal core as the app, so it needs the
+    // app's modules rather than only ghostty-vt.
+    _ = try deps.add(exe);
     if (cfg.pie) exe.pie = true;
 
     const test_exe = b.addTest(.{
@@ -52,8 +51,7 @@ pub fn init(
         // Crash on x86_64 without this
         .use_llvm = true,
     });
-    test_exe.root_module.addImport("build_options", options);
-    test_exe.root_module.addImport("ghostty-vt", mod.vt);
+    _ = try deps.add(test_exe);
 
     const install_step = b.addInstallArtifact(exe, .{});
     cfg.addPatchElf(exe, &install_step.step);

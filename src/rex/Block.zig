@@ -33,8 +33,8 @@ const log = std.log.scoped(.rex_block);
 pub const ReadBuffer = [64 * 1024]u8;
 
 /// libxev's kqueue backend reports readiness without reading when given
-/// an empty buffer.
-const kqueue = if (xev.dynamic) false else xev.backend == .kqueue;
+/// an empty buffer. Only then may blocks share a `ReadBuffer`.
+pub const kqueue = if (xev.dynamic) false else xev.backend == .kqueue;
 
 /// The default scrollback limit, sized to hold at least 10,000 lines of
 /// history at 80 columns. One 400 KiB page holds about 600 rows there, and
@@ -122,6 +122,8 @@ exited: bool = false,
 killed: bool = false,
 /// The pty read is armed and counted in `pending`.
 reading: bool = false,
+/// `stopRead()` queued the cancel.
+stop_requested: bool = false,
 
 read_c: xev.Completion = .{},
 cancel_c: xev.Completion = .{},
@@ -265,7 +267,8 @@ pub fn kill(self: *Block) void {
 /// callback: libxev's kqueue backend can drop that removal under
 /// `.no_wait`, leaving the pty registered.
 fn stopRead(self: *Block) void {
-    if (!self.reading or self.cancel_c.state() == .active) return;
+    if (!self.reading or self.stop_requested) return;
+    self.stop_requested = true;
     if (comptime xev.dynamic) switch (xev.backend) {
         inline else => |tag| {
             self.cancel_c.ensureTag(tag);
@@ -294,8 +297,9 @@ fn cancelReadOn(
         .callback = (struct {
             fn cb(ud: ?*anyopaque, _: *api.Loop, _: *api.Completion, _: api.Result) api.CallbackAction {
                 const b: *Block = @ptrCast(@alignCast(ud.?));
-                // A read canceled before it was submitted never calls onRead.
-                b.endRead();
+                // io_uring always completes the canceled read itself, maybe
+                // in a later batch. Elsewhere the read never calls onRead.
+                if (xev.backend != .io_uring) b.endRead();
                 b.pending -= 1;
                 return .disarm;
             }
@@ -368,17 +372,31 @@ fn onRead(
         break :data self.read_buf[0..len];
     } else buf.slice[0..n];
     self.processOutput(data);
+    // The cancel raced this read, so io_uring's cancel can't end it.
+    if (self.stop_requested and xev.backend == .io_uring) {
+        self.endRead();
+        return .disarm;
+    }
     return rearm(c);
 }
 
-/// EOF, or EIO on macOS: every holder of the slave has closed it.
+/// EOF, or EIO: every holder of the slave has closed it.
 fn readEnded(self: *Block, c: *xev.Completion, err: anyerror) xev.CallbackAction {
     if (err != error.EOF) log.debug("pty read ended err={}", .{err});
-    self.stopRead();
-    return rearm(c);
+    if (comptime kqueue) {
+        self.stopRead();
+        return rearm(c);
+    }
+    // epoll's cancel removes the fd, so it must still be registered then.
+    if (self.stop_requested and xev.backend == .epoll) return rearm(c);
+    // Elsewhere no cancel is queued here: on io_uring it would be submitted
+    // before the rearmed read, miss it, and free the block under the read.
+    self.endRead();
+    return .disarm;
 }
 
-fn rearm(c: *xev.Completion) xev.CallbackAction {
+/// Rearm a read or readiness completion from its callback.
+pub fn rearm(c: *xev.Completion) xev.CallbackAction {
     // kqueue leaves a read it performed at submit time marked dead and
     // holding its result when it is rearmed, though it stays registered,
     // and a cancel ignores it in either state.

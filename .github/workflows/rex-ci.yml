@@ -41,3 +41,9 @@ jobs:
 
       - name: Test rap
         run: zig build test -Dapp-runtime=none -Dfont-backend=freetype -Dtest-filter=rap
+
+      - name: Build rap
+        run: zig build rap -Dapp-runtime=none -Dfont-backend=freetype
+
+      - name: rap e2e
+        run: test/rex/e2e.sh zig-out/bin/rap
