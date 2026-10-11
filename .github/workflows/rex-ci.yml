@@ -33,20 +33,11 @@ jobs:
           done
           if [ -n "$paths" ]; then zig fmt --check $paths; else echo "no Rex/rap sources yet"; fi
 
-      # Zig's TLS client fails against gitlab.freedesktop.org, so fetch those
-      # (manifest-less tarballs, hash unaffected) with curl into the cache.
-      - name: Prefetch freedesktop dependencies
-        run: |
-          grep '^https://gitlab.freedesktop.org/' build.zig.zon.txt | while IFS= read -r url; do
-            f="$RUNNER_TEMP/$(basename "$url")"
-            curl -fsSL --retry 3 -o "$f" "$url"
-            zig fetch "$f"
-          done
-
-      # app-runtime=none avoids GTK system deps; a filter matching no
-      # tests still passes.
+      # app-runtime=none avoids GTK system deps. font-backend=freetype skips
+      # fontconfig, whose gitlab.freedesktop.org URL Zig's TLS client can't
+      # fetch. A filter matching no tests still passes.
       - name: Test rex
-        run: zig build test -Dapp-runtime=none -Dtest-filter=rex
+        run: zig build test -Dapp-runtime=none -Dfont-backend=freetype -Dtest-filter=rex
 
       - name: Test rap
-        run: zig build test -Dapp-runtime=none -Dtest-filter=rap
+        run: zig build test -Dapp-runtime=none -Dfont-backend=freetype -Dtest-filter=rap
