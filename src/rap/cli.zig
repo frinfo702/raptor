@@ -67,16 +67,18 @@ pub const Args = struct {
 };
 
 const value_flags = std.StaticStringMap(enum { session, window, block, server, idle_timeout }).initComptime(.{
-    .{ "-s", .session },                  .{ "--session", .session },
-    .{ "-w", .window },                   .{ "--window", .window },
-    .{ "-b", .block },                    .{ "--block", .block },
-    .{ "-S", .server },                   .{ "--server", .server },
+    .{ "-s", .session },
+    .{ "-w", .window },
+    .{ "-b", .block },
+    .{ "-S", .server },
     .{ "--idle-timeout", .idle_timeout },
 });
 
-const bool_flags = std.StaticStringMap(enum { json, wait, all, down, right }).initComptime(.{
-    .{ "--json", .json }, .{ "--wait", .wait },   .{ "--all", .all },
-    .{ "--down", .down }, .{ "--right", .right },
+const bool_flags = std.StaticStringMap(enum { json, wait, all, down }).initComptime(.{
+    .{ "--json", .json },
+    .{ "--wait", .wait },
+    .{ "--all", .all },
+    .{ "--down", .down },
 });
 
 pub const ParseError = error{ MissingValue, UnknownFlag } || Allocator.Error;
@@ -103,7 +105,6 @@ pub fn parse(alloc: Allocator, argv: []const []const u8, bad: *[]const u8) Parse
                 inline else => |f| @field(args, @tagName(f)) = argv[i],
             }
         } else if (bool_flags.get(a)) |field| switch (field) {
-            .right => args.down = false,
             inline else => |f| @field(args, @tagName(f)) = true,
         } else return error.UnknownFlag;
     }
@@ -170,7 +171,6 @@ const Ctx = struct {
         const cmd = words[0];
         const Cmd = enum {
             ls,
-            list,
             new,
             run,
             split,
@@ -192,7 +192,7 @@ const Ctx = struct {
             return .usage;
         };
         return switch (which) {
-            .ls, .list => self.ls(),
+            .ls => self.ls(),
             .new => self.new(),
             .run => self.runCmd(),
             .split => self.split(),
@@ -288,14 +288,15 @@ const Ctx = struct {
         block: ?[]const u8 = null,
     };
 
-    /// The target flags, defaulting to the block this runs in.
+    /// The target flags, defaulting to the session and block this runs in.
     fn target(self: *Ctx) Target {
         const a = self.args;
-        if (a.session == null and a.window == null and a.block == null) return .{
-            .session = self.env.get("RAP_SESSION"),
-            .block = self.env.get("RAP_BLOCK"),
+        const none = a.session == null and a.window == null and a.block == null;
+        return .{
+            .session = a.session orelse self.env.get("RAP_SESSION"),
+            .window = a.window,
+            .block = if (none) self.env.get("RAP_BLOCK") else a.block,
         };
-        return .{ .session = a.session, .window = a.window, .block = a.block };
     }
 
     fn str(v: std.json.Value, key: []const u8) []const u8 {

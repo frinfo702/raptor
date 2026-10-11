@@ -127,6 +127,10 @@ sessions: std.ArrayList(*Session) = .empty,
 clients: std.ArrayList(*Client) = .empty,
 /// Closed blocks whose engine still has work on the loop.
 dying: std.ArrayList(*Pane) = .empty,
+/// The exit codes of the latest blocks whose program exited, so that a
+/// wait or write arriving after the block is gone still gets an answer.
+exited: [64]struct { id: ids.Uuid, code: u32 } = @splat(.{ .id = @splat(0), .code = 0 }),
+exited_next: usize = 0,
 /// Clients dropped during this loop iteration, then during the previous
 /// one. A client is freed only after the loop has run once more so that
 /// its disarmed poll is gone before its fd number can be reused.
@@ -145,13 +149,19 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
         const dirz = try alloc.dupeSentinel(u8, dir, 0);
         defer alloc.free(dirz);
         if (c.mkdir(dirz, 0o700) != 0 and posix.errno(-1) != .EXIST) return error.SocketDir;
+        const dir_fd = c.open(dirz, .{ .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true });
+        if (dir_fd < 0) return error.SocketDir;
+        defer _ = c.close(dir_fd);
+        var st: c.Stat = undefined;
+        if (c.fstat(dir_fd, &st) != 0) return error.SocketDir;
+        if (st.uid != c.getuid() or st.mode & 0o022 != 0) return error.SocketDirUnsafe;
     }
 
     // Only the lock holder may touch the socket path, so a stale socket
     // left by a crashed server is removed here and nowhere else.
     const lock_path = try std.fmt.allocPrintSentinel(alloc, "{s}.lock", .{path}, 0);
     defer alloc.free(lock_path);
-    const lock_fd = c.open(lock_path, .{ .ACCMODE = .RDWR, .CREAT = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
+    const lock_fd = c.open(lock_path, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
     if (lock_fd < 0) return error.LockFailed;
     errdefer _ = c.close(lock_fd);
     if (c.flock(lock_fd, c.LOCK.EX | c.LOCK.NB) != 0) return error.AlreadyRunning;
@@ -558,6 +568,8 @@ fn onBlockEvent(block: *Block, event: Block.Event) void {
         }),
         .child_exited => |e| {
             pane.exit_code = e.exit_code;
+            self.exited[self.exited_next % self.exited.len] = .{ .id = pane.id, .code = e.exit_code };
+            self.exited_next += 1;
             var result: [32]u8 = undefined;
             const body = std.fmt.bufPrint(&result, "{{\"exit_code\":{d}}}", .{e.exit_code}) catch unreachable;
             for (pane.waiters.items) |waiter| self.respond(waiter.client, waiter.id, body);
@@ -796,7 +808,6 @@ const methods = std.StaticStringMap(Handler).initComptime(.{
     .{ "session.focus", &sessionFocus },
     .{ "session.set_label", &sessionSetLabel },
     .{ "session.set_window_label", &sessionSetWindowLabel },
-    .{ "session.set_block_label", &sessionSetBlockLabel },
     .{ "session.describe_block", &sessionDescribeBlock },
     .{ "session.kill", &sessionKill },
     .{ "block.close", &blockClose },
@@ -890,20 +901,18 @@ const Target = struct {
 /// Resolve the `session`, `window`, and `block` params. A missing session
 /// is the block's session, else the newest one; a missing window is the
 /// block's window, else the active one; a missing block is the window's
-/// focused block. Block positions count within the window.
+/// focused block. Block positions count within the window, so a block
+/// position alone targets the newest session.
 fn resolve(self: *Server, req: *Request) Error!Target {
     const block_q = req.str("block");
     const s: *Session = if (req.str("session")) |q|
         try match(Session, "session", self.sessions.items, q, req)
-    else if (block_q != null and req.str("window") == null) s: {
+    else if (block_q != null and req.str("window") == null and
+        std.meta.isError(std.fmt.parseInt(usize, block_q.?, 10)))
+    s: {
         var all: std.ArrayList(*Pane) = .empty;
         for (self.sessions.items) |sess| try all.appendSlice(req.arena, try sessionPanes(sess, req.arena));
-        const pane = match(Pane, "block", all.items, block_q.?, req) catch |err| {
-            if (self.sessions.items.len == 0) return err;
-            // Positions are relative to the newest session's window.
-            break :s self.sessions.items[self.sessions.items.len - 1];
-        };
-        break :s pane.window.?.session;
+        break :s (try match(Pane, "block", all.items, block_q.?, req)).window.?.session;
     } else if (self.sessions.items.len > 0)
         self.sessions.items[self.sessions.items.len - 1]
     else
@@ -1219,13 +1228,6 @@ fn sessionSetWindowLabel(self: *Server, req: *Request, w: *Stringify) Error!void
     try w.write(.{});
 }
 
-fn sessionSetBlockLabel(self: *Server, req: *Request, w: *Stringify) Error!void {
-    const t = try self.resolve(req);
-    _ = try self.newLabel(req, &t.pane.label);
-    self.viewChanged(t.session);
-    try w.write(.{});
-}
-
 fn sessionDescribeBlock(self: *Server, req: *Request, w: *Stringify) Error!void {
     const t = try self.resolve(req);
     try w.beginObject();
@@ -1255,9 +1257,18 @@ fn blockClose(self: *Server, req: *Request, w: *Stringify) Error!void {
     try w.write(.{});
 }
 
+/// The exit code of the `block` param if it names, by full id, a block
+/// whose program has exited.
+fn exitedCode(self: *Server, req: *Request) ?u32 {
+    const q = req.str("block") orelse return null;
+    const bare = if (std.mem.startsWith(u8, q, "block:")) q["block:".len..] else q;
+    for (self.exited) |e| if (std.mem.eql(u8, &e.id, bare)) return e.code;
+    return null;
+}
+
 fn blockWait(self: *Server, req: *Request, w: *Stringify) Error!void {
+    if (self.exitedCode(req)) |code| return w.write(.{ .exit_code = code });
     const pane = (try self.resolve(req)).pane;
-    if (pane.exit_code) |code| return w.write(.{ .exit_code = code });
     try pane.waiters.append(self.alloc, .{ .client = req.client, .id = req.id });
     return error.Deferred;
 }
@@ -1273,9 +1284,11 @@ const block_methods = std.StaticStringMap(BlockMethod).initComptime(.{
 });
 
 fn blockMethod(self: *Server, req: *Request, w: *Stringify) Error!void {
-    const pane = (try self.resolve(req)).pane;
     const name = req.str("method") orelse return req.fail(error.Usage, "method is required", .{});
     const method = block_methods.get(name) orelse return req.fail(error.Usage, "unknown block method '{s}'", .{name});
+    if (method == &methodWrite and self.exitedCode(req) != null)
+        return req.fail(error.Fail, "the block's program has exited", .{});
+    const pane = (try self.resolve(req)).pane;
     try method(pane, req, w);
 }
 
@@ -1303,7 +1316,6 @@ fn methodTitle(pane: *Pane, _: *Request, w: *Stringify) Error!void {
 
 fn methodWrite(pane: *Pane, req: *Request, w: *Stringify) Error!void {
     const data = req.str("data") orelse return req.fail(error.Usage, "data is required", .{});
-    if (pane.exit_code != null) return req.fail(error.Fail, "the block's program has exited", .{});
     try pane.block.write(data);
     try w.write(.{ .written = data.len });
 }

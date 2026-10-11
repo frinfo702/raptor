@@ -71,6 +71,10 @@ expect_status 3 "$RAP" capture -s nope
 
 # Splits, zoom, focus, and inspection.
 block=$("$RAP" split -s demo --down -- /bin/sh -c 'echo split-ok; sleep 30')
+# A bare block position counts in the newest session, not across all.
+"$RAP" new pos -- /bin/sh >/dev/null
+expect_status 3 "$RAP" close -b 2
+"$RAP" kill pos
 "$RAP" zoom -s demo -b "$block"
 "$RAP" focus -s demo -b 1
 "$RAP" session inspect demo | grep -q 'windows: 1' || fail "session inspect"
@@ -85,8 +89,13 @@ wait_capture demo keys
 
 # run --wait and wait pass the child's status through.
 expect_status 7 "$RAP" run -s demo --wait -- /bin/sh -c 'exit 7'
-block=$("$RAP" run -s demo -- /bin/sh -c 'sleep 0.3; exit 5')
+block=$("$RAP" run -s demo -- /bin/sh -c 'exit 5')
 expect_status 5 "$RAP" wait -b "$block"
+# Even once the block is gone, and writing to it then fails.
+block=$("$RAP" run -s demo -- true)
+expect_status 0 "$RAP" wait -b "$block"
+expect_status 0 "$RAP" wait -b "$block"
+expect_status 1 "$RAP" send -b "$block" x
 
 # Events stream as JSON lines.
 "$RAP" events >"$tmp/events" &

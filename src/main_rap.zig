@@ -78,11 +78,12 @@ fn onSignal(_: posix.SIG) callconv(.c) void {
 fn serverRun(init: std.process.Init, args: cli.Args, stderr: *std.Io.Writer) !ExitCode {
     const alloc = init.arena.allocator();
     const idle_ms: u64 = if (args.idle_timeout) |t| ms: {
-        const secs = std.fmt.parseFloat(f64, t) catch {
+        const secs = std.fmt.parseFloat(f64, t) catch std.math.nan(f64);
+        if (!(secs >= 0 and secs <= 1e9)) {
             try stderr.print("rap: invalid --idle-timeout '{s}'\n", .{t});
             return .usage;
-        };
-        break :ms @intFromFloat(@max(secs, 0) * 1000);
+        }
+        break :ms @intFromFloat(secs * 1000);
     } else 30_000;
     const path = try cli.resolveSocketPath(alloc, init.io, init.environ_map, args.server);
 

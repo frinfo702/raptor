@@ -172,18 +172,20 @@ pub fn unixSocket() error{SocketFailed}!posix.fd_t {
     return fd;
 }
 
-pub const ConnectError = error{ Unreachable, NameTooLong, SocketFailed };
+pub const ConnectError = error{ Unreachable, NameTooLong, SocketFailed, ForeignServer };
 
-/// Connect to the server. `Unreachable` means no server is listening.
+/// Connect to the server. `Unreachable` means no server is listening, and
+/// `ForeignServer` that another user's process is.
 pub fn connect(path: []const u8) ConnectError!posix.fd_t {
     const addr = try sockaddr(path);
     const fd = try unixSocket();
-    while (true) {
-        if (c.connect(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) == 0) return fd;
-        if (posix.errno(-1) == .INTR) continue;
-        _ = c.close(fd);
-        return error.Unreachable;
+    errdefer _ = c.close(fd);
+    while (c.connect(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) != 0) {
+        if (posix.errno(-1) != .INTR) return error.Unreachable;
     }
+    const p = peer(fd) catch return error.ForeignServer;
+    if (p.uid != c.getuid()) return error.ForeignServer;
+    return fd;
 }
 
 pub const Peer = struct {
