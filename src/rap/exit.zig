@@ -19,4 +19,7 @@ pub const Code = enum(u8) {
 
     /// The command was interrupted (128 + SIGINT).
     interrupted = 130,
+
+    /// `wait` and `run --wait` pass through any status of the child.
+    _,
 };

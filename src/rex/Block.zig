@@ -33,8 +33,8 @@ const log = std.log.scoped(.rex_block);
 pub const ReadBuffer = [64 * 1024]u8;
 
 /// libxev's kqueue backend reports readiness without reading when given
-/// an empty buffer.
-const kqueue = if (xev.dynamic) false else xev.backend == .kqueue;
+/// an empty buffer. Only then may blocks share a `ReadBuffer`.
+pub const kqueue = if (xev.dynamic) false else xev.backend == .kqueue;
 
 /// The default scrollback limit, sized to hold at least 10,000 lines of
 /// history at 80 columns. One 400 KiB page holds about 600 rows there, and
@@ -378,7 +378,8 @@ fn readEnded(self: *Block, c: *xev.Completion, err: anyerror) xev.CallbackAction
     return rearm(c);
 }
 
-fn rearm(c: *xev.Completion) xev.CallbackAction {
+/// Rearm a read or readiness completion from its callback.
+pub fn rearm(c: *xev.Completion) xev.CallbackAction {
     // kqueue leaves a read it performed at submit time marked dead and
     // holding its result when it is rearmed, though it stays registered,
     // and a cancel ignores it in either state.
