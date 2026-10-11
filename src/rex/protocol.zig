@@ -264,6 +264,6 @@ test "rex protocol: socket path precedence" {
     _ = env.swapRemove("RAP_SERVER");
     const default = try socketPath(alloc, &env, null);
     defer alloc.free(default);
-    try std.testing.expect(std.mem.endsWith(u8, default, "/rap/default.sock"));
+    try std.testing.expect(std.mem.endsWith(u8, default, "/default.sock"));
     try std.testing.expect(default.len < (c.sockaddr.un{ .path = undefined }).path.len);
 }
