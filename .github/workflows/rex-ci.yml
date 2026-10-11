@@ -1,0 +1,42 @@
+# Fork-only CI for Rex/rap. The upstream ghostty workflows need Namespace
+# runners this fork does not have, so they are disabled in repo settings
+# (`gh workflow disable`) instead of edited, keeping upstream merges clean.
+name: Rex CI
+on:
+  pull_request:
+  push:
+    branches: [zig-0.17]
+
+concurrency:
+  group: rex-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+
+      # Only check paths that exist; Rex/rap sources land incrementally.
+      - name: zig fmt
+        run: |
+          paths=""
+          for p in src/rex src/rap src/main_rap.zig src/build/RapExe.zig; do
+            [ -e "$p" ] && paths="$paths $p"
+          done
+          if [ -n "$paths" ]; then zig fmt --check $paths; else echo "no Rex/rap sources yet"; fi
+
+      # app-runtime=none avoids GTK system deps; a filter matching no
+      # tests still passes.
+      - name: Test rex
+        run: zig build test -Dapp-runtime=none -Dtest-filter=rex
+
+      - name: Test rap
+        run: zig build test -Dapp-runtime=none -Dtest-filter=rap
