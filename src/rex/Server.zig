@@ -7,6 +7,14 @@
 //! each window lays its blocks out in a split tree. Every change to what a
 //! session looks like bumps its `revision`.
 //!
+//! Clients mirror blocks through data-plane streams. Every subscriber of a
+//! block gets the same bytes in the same order: a snapshot or a replay
+//! from the block's ring, then each chunk of pty output and each resize.
+//! Writes to a client never block. A client that falls behind by more
+//! than its outbox cap loses that stream's queued output and gets a fresh
+//! snapshot once it has caught up, so one slow client never holds up the
+//! loop, a pty, or another client.
+//!
 //! See `protocol.zig` for framing and message shapes.
 const Server = @This();
 
@@ -20,6 +28,7 @@ const Stringify = std.json.Stringify;
 const build_config = @import("../build_config.zig");
 const xev = @import("../global.zig").xev;
 const Block = @import("Block.zig");
+const dataplane = @import("dataplane.zig");
 const ids = @import("ids.zig");
 const layout = @import("layout.zig");
 const protocol = @import("protocol.zig");
@@ -85,6 +94,32 @@ const Pane = struct {
     exit_code: ?u32 = null,
     /// Requests answered when the child exits.
     waiters: std.ArrayList(Waiter) = .empty,
+    /// Data-plane subscriptions to this block.
+    streams: std.ArrayList(*Stream) = .empty,
+    /// Recent output, kept while there are streams.
+    ring: ?*dataplane.Ring = null,
+    /// The client whose size requests set the grid size: the one that most
+    /// recently focused the block or sent it input.
+    owner: ?*Client = null,
+    /// The seq of the latest resize. Output from before it can't be
+    /// replayed, since replay carries no grid markers.
+    grid_seq: ?u64 = null,
+};
+
+/// One client's subscription to one block.
+const Stream = struct {
+    id: u32,
+    client: *Client,
+    pane: *Pane,
+    /// What the client must get before live output.
+    need: union(enum) {
+        none,
+        snapshot,
+        /// Output after this seq, from the ring.
+        replay: u64,
+    } = .snapshot,
+    /// The size the client asks for, applied while it owns the block.
+    want: ?protocol.Size = null,
 };
 
 const Waiter = struct {
@@ -98,6 +133,14 @@ const Client = struct {
     fd: posix.fd_t,
     peer: protocol.Peer,
     poll_c: xev.Completion = .{},
+    /// The read poll is on the loop.
+    reading: bool = true,
+    write_c: xev.Completion = .{},
+    /// A write of `outbox.pending()` is on the loop.
+    writing: bool = false,
+    outbox: dataplane.Outbox = .{},
+    streams: std.ArrayList(*Stream) = .empty,
+    next_stream: u32 = 1,
     in: std.ArrayList(u8) = .empty,
     subscribed: bool = false,
     /// Only events of this session (and server-wide ones) are sent.
@@ -331,15 +374,14 @@ fn onListen(
 
 fn addClient(self: *Server, fd: posix.fd_t) void {
     protocol.setCloexec(fd);
-    // Writes block, bounded by a send timeout, so replies stay ordered.
-    // Reads never block: they use MSG_DONTWAIT after readiness.
-    // ponytail: a stuck reader stalls the loop up to the timeout per
-    // write; the data plane needs per-client queues with a cap.
-    protocol.setNonblocking(fd, false);
-    const timeout: posix.timeval = .{ .sec = 5, .usec = 0 };
-    // macOS fails this with EINVAL once the peer is gone; the read below
-    // notices that.
-    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.SNDTIMEO, &timeout, @sizeOf(posix.timeval));
+    // Reads and writes never block the loop: they use MSG_DONTWAIT, and a
+    // write that doesn't fit waits on the loop. libxev's io_uring backend
+    // needs a blocking socket to wait on, the others a nonblocking one.
+    protocol.setNonblocking(fd, xev.backend != .io_uring);
+    if (comptime builtin.os.tag.isDarwin()) {
+        const on: c_int = 1;
+        _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.NOSIGPIPE, &on, @sizeOf(c_int));
+    }
 
     const p = protocol.peer(fd) catch {
         _ = c.close(fd);
@@ -382,7 +424,8 @@ fn onClient(
     _ = r catch {};
     if (!cl.closing) self.readClient(cl);
     if (cl.closing) {
-        self.dropClient(cl);
+        cl.reading = false;
+        if (!cl.writing) self.dropClient(cl);
         return .disarm;
     }
     return Block.rearm(comp);
@@ -414,13 +457,16 @@ fn readClient(self: *Server, cl: *Client) void {
     var off: usize = 0;
     while (!cl.closing) {
         const h = protocol.parseHeader(cl.in.items[off..]) orelse break;
-        if (h.len > protocol.max_frame or h.type != .json) return self.closeClient(cl);
+        if (h.len > protocol.max_frame) return self.closeClient(cl);
         const end = off + protocol.header_len + h.len;
         if (cl.in.items.len < end) break;
-        self.handleFrame(cl, cl.in.items[off + protocol.header_len .. end]);
+        const payload = cl.in.items[off + protocol.header_len .. end];
+        if (h.type == .json) self.handleFrame(cl, payload) else self.handleData(cl, h.type, payload);
         off = end;
     }
     cl.in.replaceRangeAssumeCapacity(0, off, &.{});
+    // New streams and resets get their snapshots after the replies.
+    self.pump(cl);
     if (eof) self.closeClient(cl);
 }
 
@@ -440,6 +486,7 @@ fn dropClient(self: *Server, cl: *Client) void {
     };
     for (self.sessions.items) |s| for (s.windows.items) |w| self.dropWaiters(w.tree.root, cl);
     for (self.dying.items) |pane| removeWaiters(pane, cl);
+    while (cl.streams.items.len > 0) self.removeStream(cl.streams.items[cl.streams.items.len - 1]);
     self.dead.append(self.alloc, cl) catch self.freeClient(cl);
     self.emit("client_disconnected", null, .{ .client = prefixed("client", &cl.id) });
 }
@@ -466,15 +513,77 @@ fn removeWaiters(pane: *Pane, cl: *Client) void {
 fn freeClient(self: *Server, cl: *Client) void {
     _ = c.close(cl.fd);
     cl.in.deinit(self.alloc);
+    cl.outbox.deinit(self.alloc);
+    // Streams are left only if the client was never dropped, and then
+    // their blocks are gone too.
+    for (cl.streams.items) |st| self.alloc.destroy(st);
+    cl.streams.deinit(self.alloc);
     self.alloc.destroy(cl);
 }
 
 fn send(self: *Server, cl: *Client, payload: []const u8) void {
     if (cl.closing) return;
-    protocol.writeFrame(cl.fd, .json, payload) catch {
+    // A client that reads none of its replies and events is dropped
+    // rather than queued for without bound.
+    if (cl.outbox.counted + payload.len > 2 * dataplane.Outbox.cap) {
         log.info("dropping client that stopped reading", .{});
-        self.closeClient(cl);
-    };
+        return self.closeClient(cl);
+    }
+    const frame = self.alloc.alloc(u8, protocol.header_len + payload.len) catch
+        return self.closeClient(cl);
+    frame[0..protocol.header_len].* = protocol.header(payload.len, .json);
+    @memcpy(frame[protocol.header_len..], payload);
+    self.queue(cl, .{ .bytes = frame, .kind = .control });
+}
+
+fn queue(self: *Server, cl: *Client, f: dataplane.Outbox.Frame) void {
+    cl.outbox.push(self.alloc, f) catch return self.closeClient(cl);
+    self.flush(cl);
+}
+
+/// Write queued frames until the socket is full, then have the loop
+/// finish the oldest one once the client reads.
+fn flush(self: *Server, cl: *Client) void {
+    if (cl.writing or cl.closing) return;
+    const flags: u32 = c.MSG.DONTWAIT | if (builtin.os.tag == .linux) c.MSG.NOSIGNAL else 0;
+    while (cl.outbox.pending()) |rest| {
+        const n = c.send(cl.fd, rest.ptr, rest.len, flags);
+        if (n < 0) switch (posix.errno(n)) {
+            .INTR => continue,
+            .AGAIN => {
+                cl.writing = true;
+                xev.TCP.initFd(cl.fd).write(&self.loop, &cl.write_c, .{ .slice = rest }, Client, cl, onWrite);
+                return;
+            },
+            else => return self.closeClient(cl),
+        };
+        cl.outbox.consume(self.alloc, @intCast(n));
+    }
+}
+
+fn onWrite(
+    cl_: ?*Client,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    _: xev.TCP,
+    _: xev.WriteBuffer,
+    r: xev.WriteError!usize,
+) xev.CallbackAction {
+    const cl = cl_.?;
+    const self = cl.server;
+    cl.writing = false;
+    if (r) |n| {
+        if (!cl.closing) cl.outbox.consume(self.alloc, n);
+    } else |_| self.closeClient(cl);
+    if (cl.closing) {
+        if (!cl.reading) self.dropClient(cl);
+        return .disarm;
+    }
+    // Like libxev's own write queue, the next write may reuse the
+    // completion from its callback.
+    self.flush(cl);
+    self.pump(cl);
+    return .disarm;
 }
 
 fn respond(self: *Server, cl: *Client, id: ?i64, result: []const u8) void {
@@ -548,7 +657,8 @@ fn onBlockEvent(block: *Block, event: Block.Event) void {
     const self = pane.server;
     const id = prefixed("block", &pane.id);
     switch (event) {
-        .output, .write_pty => {},
+        .output => |data| self.forwardOutput(pane, data),
+        .write_pty => {},
         .title_changed => |t| {
             pane.title.clearRetainingCapacity();
             pane.title.appendSlice(self.alloc, t) catch {};
@@ -590,6 +700,191 @@ fn onBlockEvent(block: *Block, event: Block.Event) void {
     }
 }
 
+// Data plane
+
+fn forwardOutput(self: *Server, pane: *Pane, data: []const u8) void {
+    if (pane.streams.items.len == 0) return;
+    pane.ring.?.push(data);
+    const seq = pane.block.seq;
+    for (pane.streams.items) |st| if (st.need == .none)
+        self.queueData(st, .out, protocol.Out{ .stream = st.id, .seq = seq }, data);
+    // A snapshot put off by an unfinished escape sequence may work now.
+    for (pane.streams.items) |st| if (st.need != .none) self.pump(st.client);
+}
+
+/// Queue a data frame for the stream. Past the outbox cap, drop what the
+/// stream has queued instead and resend it as a snapshot later.
+fn queueData(self: *Server, st: *Stream, t: protocol.FrameType, fields: anytype, tail: []const u8) void {
+    const cl = st.client;
+    if (cl.closing) return;
+    const frame = protocol.encodeData(self.alloc, t, fields, tail) catch return self.closeClient(cl);
+    if (!cl.outbox.fits(frame.len)) {
+        self.alloc.free(frame);
+        return self.resync(st);
+    }
+    self.queue(cl, .{ .bytes = frame, .kind = .data, .stream = st.id });
+}
+
+/// Drop what the stream has queued; it gets a snapshot once the client
+/// has read everything queued before.
+fn resync(self: *Server, st: *Stream) void {
+    st.client.outbox.dropStream(self.alloc, st.id);
+    st.need = .snapshot;
+}
+
+/// Bring the client's waiting streams up to date: replays at once,
+/// snapshots once the client has read everything queued.
+fn pump(self: *Server, cl: *Client) void {
+    for (cl.streams.items) |st| {
+        if (cl.closing) return;
+        if (st.need == .replay) self.replay(st, st.need.replay);
+        if (st.need == .snapshot and cl.outbox.isEmpty()) self.sendSnapshot(st);
+    }
+}
+
+/// Send the output after `since` from the ring, or fall back to a
+/// snapshot if the ring no longer has all of it.
+fn replay(self: *Server, st: *Stream, since: u64) void {
+    const pane = st.pane;
+    const resized = if (pane.grid_seq) |g| since <= g else false;
+    const parts = (if (resized) null else pane.ring.?.since(since)) orelse {
+        st.need = .snapshot;
+        return;
+    };
+    st.need = .none;
+    var seq = since;
+    for (parts) |part| if (part.len > 0) {
+        seq += part.len;
+        self.queueData(st, .out, protocol.Out{ .stream = st.id, .seq = seq }, part);
+    };
+}
+
+fn sendSnapshot(self: *Server, st: *Stream) void {
+    const cl = st.client;
+    var buf: std.Io.Writer.Allocating = .init(self.alloc);
+    defer buf.deinit();
+    st.pane.block.snapshot(self.alloc, &buf.writer) catch |err| switch (err) {
+        // Retried after the block's next output.
+        error.ContinuationUnavailable => return,
+        else => {
+            log.warn("snapshot failed err={t}", .{err});
+            return self.closeClient(cl);
+        },
+    };
+    st.need = .none;
+
+    const bytes = buf.written();
+    const chunk = 64 * 1024;
+    var off: usize = 0;
+    while (true) {
+        const end = @min(off + chunk, bytes.len);
+        const frame = protocol.encodeData(self.alloc, .snap, protocol.Snap{
+            .stream = st.id,
+            .base_seq = st.pane.block.seq,
+            .flags = .{ .first = off == 0, .last = end == bytes.len },
+        }, bytes[off..end]) catch return self.closeClient(cl);
+        cl.outbox.push(self.alloc, .{ .bytes = frame, .kind = .snap, .stream = st.id }) catch
+            return self.closeClient(cl);
+        if (end == bytes.len) break;
+        off = end;
+    }
+    self.flush(cl);
+}
+
+fn findStream(cl: *Client, id: u32) ?*Stream {
+    for (cl.streams.items) |st| if (st.id == id) return st;
+    return null;
+}
+
+fn removePtr(comptime T: type, list: *std.ArrayList(*T), item: *T) void {
+    for (list.items, 0..) |it, i| if (it == item) {
+        _ = list.swapRemove(i);
+        return;
+    };
+}
+
+fn removeStream(self: *Server, st: *Stream) void {
+    const pane = st.pane;
+    removePtr(Stream, &st.client.streams, st);
+    removePtr(Stream, &pane.streams, st);
+    if (pane.owner == st.client) {
+        for (pane.streams.items) |other| {
+            if (other.client == st.client) break;
+        } else pane.owner = null;
+    }
+    if (pane.streams.items.len == 0) if (pane.ring) |r| {
+        self.alloc.destroy(r);
+        pane.ring = null;
+    };
+    self.alloc.destroy(st);
+}
+
+/// A data frame from a client. Frames for a stream that is gone are
+/// ignored, since the client may not have heard yet.
+fn handleData(self: *Server, cl: *Client, t: protocol.FrameType, payload: []const u8) void {
+    switch (t) {
+        .in => {
+            const f, const bytes = protocol.decodeData(protocol.In, payload) orelse return self.closeClient(cl);
+            const st = findStream(cl, f.stream) orelse return;
+            if (st.pane.exit_code != null) return;
+            st.pane.block.write(bytes) catch |err| return log.warn("dropping input err={t}", .{err});
+            self.claim(st);
+        },
+        .size => {
+            const f, _ = protocol.decodeData(protocol.Size, payload) orelse return self.closeClient(cl);
+            const st = findStream(cl, f.stream) orelse return;
+            if (f.cols < 1 or f.cols > 1000 or f.rows < 1 or f.rows > 1000) return;
+            st.want = f;
+            if (st.pane.owner == null or st.pane.owner == cl) self.claim(st);
+        },
+        .focus => {
+            const f, _ = protocol.decodeData(protocol.Focus, payload) orelse return self.closeClient(cl);
+            const st = findStream(cl, f.stream) orelse return;
+            if (f.focused != 0) self.claim(st);
+        },
+        else => self.closeClient(cl),
+    }
+}
+
+/// Make the stream's client the block's size owner, at its size.
+fn claim(self: *Server, st: *Stream) void {
+    const pane = st.pane;
+    const changed = pane.owner != st.client;
+    pane.owner = st.client;
+    const want = st.want orelse return;
+    const term = &pane.block.term;
+    if (!changed and want.cols == term.cols and want.rows == term.rows) return;
+    self.resizePane(pane, want);
+}
+
+/// Resize the block between two pty reads and mark that point in every
+/// stream, so that every mirror reflows at the same output as the server.
+fn resizePane(self: *Server, pane: *Pane, size: protocol.Size) void {
+    pane.block.resize(size.cols, size.rows, size.cell_w_px, size.cell_h_px) catch |err| {
+        log.warn("resizing block failed err={t}", .{err});
+        return;
+    };
+    const seq = pane.block.seq;
+    pane.grid_seq = seq;
+    var owner_buf: [prefixed("client", &@splat(0)).len]u8 = undefined;
+    const owner: []const u8 = if (pane.owner) |o| owner: {
+        owner_buf = prefixed("client", &o.id);
+        break :owner &owner_buf;
+    } else "";
+    for (pane.streams.items) |st| if (st.need == .none) self.queueData(st, .grid, protocol.Grid{
+        .stream = st.id,
+        .seq = seq,
+        .cols = size.cols,
+        .rows = size.rows,
+    }, owner);
+    self.emit("size_changed", &pane.session_id, .{
+        .block = prefixed("block", &pane.id),
+        .cols = size.cols,
+        .rows = size.rows,
+        .owner = owner,
+    });
+}
+
 // Model
 
 fn sessionByLabel(self: *Server, label: []const u8) ?*Session {
@@ -603,6 +898,8 @@ fn freePane(self: *Server, pane: *Pane) void {
     pane.title.deinit(self.alloc);
     pane.pwd.deinit(self.alloc);
     pane.waiters.deinit(self.alloc);
+    pane.streams.deinit(self.alloc);
+    if (pane.ring) |r| self.alloc.destroy(r);
     self.alloc.destroy(pane);
 }
 
@@ -694,6 +991,7 @@ fn closePane(self: *Server, pane: *Pane) void {
 fn retirePane(self: *Server, pane: *Pane) void {
     const w = pane.window.?;
     pane.window = null;
+    while (pane.streams.items.len > 0) self.removeStream(pane.streams.items[pane.streams.items.len - 1]);
     self.emit("block_closed", &w.session.id, .{
         .block = prefixed("block", &pane.id),
         .window = prefixed("window", &w.id),
@@ -821,6 +1119,7 @@ const methods = std.StaticStringMap(Handler).initComptime(.{
     .{ "session.kill", &sessionKill },
     .{ "block.close", &blockClose },
     .{ "block.method", &blockMethod },
+    .{ "block.subscribe", &blockSubscribe },
     .{ "block.wait", &blockWait },
 });
 
@@ -1279,6 +1578,35 @@ fn exitedCode(self: *Server, req: *Request) ?u32 {
     return null;
 }
 
+fn blockSubscribe(self: *Server, req: *Request, w: *Stringify) Error!void {
+    const pane = (try self.resolve(req)).pane;
+    const since: ?u64 = if (req.get("since_seq")) |v| since: {
+        if (v != .integer or v.integer < 0) return req.fail(error.Usage, "since_seq must be a non-negative integer", .{});
+        break :since @intCast(v.integer);
+    } else null;
+    const cl = req.client;
+    try cl.streams.ensureUnusedCapacity(self.alloc, 1);
+    try pane.streams.ensureUnusedCapacity(self.alloc, 1);
+    const st = try self.alloc.create(Stream);
+    errdefer self.alloc.destroy(st);
+    if (pane.ring == null) {
+        const ring = try self.alloc.create(dataplane.Ring);
+        ring.* = .{ .end = pane.block.seq };
+        pane.ring = ring;
+    }
+    st.* = .{
+        .id = cl.next_stream,
+        .client = cl,
+        .pane = pane,
+        .need = if (since) |s| .{ .replay = s } else .snapshot,
+    };
+    cl.next_stream +%= 1;
+    cl.streams.appendAssumeCapacity(st);
+    pane.streams.appendAssumeCapacity(st);
+    // The snapshot or replay follows the reply.
+    try w.write(.{ .stream = st.id });
+}
+
 fn blockWait(self: *Server, req: *Request, w: *Stringify) Error!void {
     if (self.exitedCode(req)) |code| return w.write(.{ .exit_code = code });
     const pane = (try self.resolve(req)).pane;
@@ -1291,6 +1619,7 @@ const BlockMethod = *const fn (*Pane, *Request, *Stringify) Error!void;
 const block_methods = std.StaticStringMap(BlockMethod).initComptime(.{
     .{ "format", &methodFormat },
     .{ "process", &methodProcess },
+    .{ "reset", &methodReset },
     .{ "size", &methodSize },
     .{ "title", &methodTitle },
     .{ "write", &methodWrite },
@@ -1312,7 +1641,15 @@ fn methodFormat(pane: *Pane, req: *Request, w: *Stringify) Error!void {
     const screen = pane.block.term.screens.active;
     const text = screen.dumpStringAlloc(req.arena, if (all) .{ .screen = .{} } else .{ .viewport = .{} }) catch |err|
         return req.fail(error.Fail, "formatting failed: {t}", .{err});
-    try w.write(.{ .text = text });
+    try w.write(.{ .text = text, .seq = pane.block.seq });
+}
+
+/// Resend every stream of the block from a fresh snapshot.
+fn methodReset(pane: *Pane, _: *Request, w: *Stringify) Error!void {
+    const self = pane.server;
+    for (pane.streams.items) |st| self.resync(st);
+    for (pane.streams.items) |st| self.pump(st.client);
+    try w.write(.{});
 }
 
 fn methodProcess(pane: *Pane, _: *Request, w: *Stringify) Error!void {

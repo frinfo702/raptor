@@ -41,6 +41,10 @@ pub const kqueue = if (xev.dynamic) false else xev.backend == .kqueue;
 /// only whole pages are pruned. Wider terminals keep fewer lines.
 pub const default_max_scrollback_bytes = 8 * 1000 * 1000;
 
+/// The longest unfinished escape sequence a snapshot can carry over. While
+/// the program is in the middle of a longer one, `snapshot` fails.
+pub const max_continuation_bytes = 64 * 1024;
+
 /// The owner must not run the loop with `.no_wait` while any write may be
 /// in flight, including replies the terminal sends on its own (DA, DSR,
 /// ...): libxev's kqueue backend drops the removal of a write finished in
@@ -113,6 +117,9 @@ pid: posix.pid_t,
 process: xev.Process,
 term: terminal.Terminal,
 vt: terminal.TerminalStream,
+/// Bytes of output the terminal has processed. A client mirroring the
+/// block counts the same bytes, so its terminal matches at equal seqs.
+seq: u64 = 0,
 
 /// Completions still registered with the loop. The block may be destroyed
 /// only once this is zero.
@@ -214,7 +221,11 @@ pub fn create(
     handler.effects.program_status = &programStatus;
     handler.effects.clipboard_write = &clipboardWrite;
     handler.effects.reset = &reset;
-    self.vt = .init(.{ .allocator = alloc, .handler = handler });
+    self.vt = .init(.{
+        .allocator = alloc,
+        .handler = handler,
+        .continuation_max_bytes = max_continuation_bytes,
+    });
     errdefer self.vt.deinit();
 
     self.process = xev.Process.init(self.pid) catch |err| {
@@ -329,7 +340,51 @@ pub fn write(self: *Block, data: []const u8) Allocator.Error!void {
 /// Run bytes through the terminal as if the program had written them.
 pub fn processOutput(self: *Block, data: []const u8) void {
     self.vt.nextSlice(data);
+    self.seq += data.len;
     self.emit(.{ .output = data });
+}
+
+/// Resize the terminal and tell the program. Zero cell sizes leave the
+/// pixel size unknown.
+pub fn resize(
+    self: *Block,
+    cols: terminal.size.CellCountInt,
+    rows: terminal.size.CellCountInt,
+    cell_w_px: u16,
+    cell_h_px: u16,
+) terminal.Terminal.ResizeError!void {
+    try self.term.resize(self.alloc, .{
+        .cols = cols,
+        .rows = rows,
+        .cell_size_px = if (cell_w_px > 0 and cell_h_px > 0)
+            .{ .width = cell_w_px, .height = cell_h_px }
+        else
+            null,
+    });
+    self.pty.setSize(.{
+        .ws_col = cols,
+        .ws_row = rows,
+        .ws_xpixel = cols *| cell_w_px,
+        .ws_ypixel = rows *| cell_h_px,
+    }) catch |err| log.warn("resizing pty failed err={}", .{err});
+}
+
+pub const SnapshotError = terminal.snapshot.EncodeError || error{
+    /// The program is in the middle of an escape sequence longer than
+    /// `max_continuation_bytes`. Try again after more output.
+    ContinuationUnavailable,
+};
+
+/// Encode a snapshot of the terminal as of `seq`.
+pub fn snapshot(self: *const Block, alloc: Allocator, w: *std.Io.Writer) SnapshotError!void {
+    var cont: std.Io.Writer.Allocating = .init(alloc);
+    defer cont.deinit();
+    self.vt.writeContinuation(&cont.writer) catch |err| return switch (err) {
+        error.ContinuationUnavailable => error.ContinuationUnavailable,
+        error.ContinuationDisabled => unreachable,
+        error.WriteFailed => error.OutOfMemory,
+    };
+    try terminal.snapshot.encode(alloc, w, &self.term, .{ .continuation = .{ .bytes = cont.written() } });
 }
 
 fn emit(self: *Block, event: Event) void {

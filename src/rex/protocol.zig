@@ -10,6 +10,16 @@
 //! - event:    {"event":"block_created","session":"session:...",...}
 //!
 //! Events reach only clients that called `session.subscribe`.
+//!
+//! The data plane streams blocks in binary frames. `block.subscribe`
+//! answers with a `stream` id, and every data frame starts with that id.
+//! Each block counts the bytes its program has written as `seq`; a client
+//! that has applied everything through `seq` is in sync at that point.
+//! After subscribing the client gets either a snapshot (`snap` chunks at
+//! `base_seq`) or, when it passed a `since_seq` the server can still
+//! replay, `out` frames from there. Then live `out` and `grid` frames
+//! follow in stream order. See `Snap`, `Out`, `Grid`, `In`, `Size` and
+//! `Focus` for the payloads.
 const std = @import("std");
 const builtin = @import("builtin");
 const posix = std.posix;
@@ -20,8 +30,115 @@ pub const version = 1;
 
 pub const FrameType = enum(u8) {
     json = 1,
+    snap = 2,
+    out = 3,
+    grid = 4,
+    in = 5,
+    size = 6,
+    focus = 7,
     _,
 };
+
+/// S->C: one chunk of a snapshot of the block's terminal at `base_seq`.
+/// The snapshot bytes follow. A new `first` chunk discards any snapshot
+/// still being received for the stream.
+pub const Snap = struct {
+    stream: u32,
+    base_seq: u64,
+    flags: SnapFlags,
+};
+
+pub const SnapFlags = packed struct(u8) {
+    first: bool = false,
+    last: bool = false,
+    _: u6 = 0,
+};
+
+/// S->C: pty output. The bytes follow, and `seq` counts the block's
+/// output through them.
+pub const Out = struct {
+    stream: u32,
+    seq: u64,
+};
+
+/// S->C: the block's grid became `cols` x `rows` after the output through
+/// `seq`. The owning client's id ("client:...") follows, if any.
+pub const Grid = struct {
+    stream: u32,
+    seq: u64,
+    cols: u16,
+    rows: u16,
+};
+
+/// C->S: input for the program (keys, paste, mouse), already encoded.
+/// The bytes follow. Sending input makes the client the size owner.
+pub const In = struct {
+    stream: u32,
+};
+
+/// C->S: the grid size this client would like. It applies while the
+/// client owns the block's size.
+pub const Size = struct {
+    stream: u32,
+    cols: u16,
+    rows: u16,
+    cell_w_px: u16,
+    cell_h_px: u16,
+};
+
+/// C->S: the client focused (1) or unfocused (0) the block. Focusing it
+/// makes the client the size owner.
+pub const Focus = struct {
+    stream: u32,
+    focused: u8,
+};
+
+/// The byte length of a data frame's fixed fields.
+fn fixedLen(comptime T: type) usize {
+    var n: usize = 0;
+    inline for (@typeInfo(T).@"struct".field_types) |F| n += @sizeOf(F);
+    return n;
+}
+
+/// A complete data frame: header, the fields of `fields` in order (little
+/// endian), then `tail`. The caller owns the result.
+pub fn encodeData(
+    alloc: Allocator,
+    t: FrameType,
+    fields: anytype,
+    tail: []const u8,
+) Allocator.Error![]u8 {
+    const T = @TypeOf(fields);
+    const len = fixedLen(T) + tail.len;
+    const buf = try alloc.alloc(u8, header_len + len);
+    buf[0..header_len].* = header(len, t);
+    var off: usize = header_len;
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |name, F| {
+        const Int = @Int(.unsigned, @bitSizeOf(F));
+        const v: Int = @bitCast(@field(fields, name));
+        std.mem.writeInt(Int, buf[off..][0..@sizeOf(Int)], v, .little);
+        off += @sizeOf(Int);
+    }
+    @memcpy(buf[off..], tail);
+    return buf;
+}
+
+/// The fixed fields of a data frame payload and the bytes after them, or
+/// null if the payload is too short.
+pub fn decodeData(comptime T: type, payload: []const u8) ?struct { T, []const u8 } {
+    if (payload.len < fixedLen(T)) return null;
+    var result: T = undefined;
+    var off: usize = 0;
+    const info = @typeInfo(T).@"struct";
+    inline for (info.field_names, info.field_types) |name, F| {
+        const Int = @Int(.unsigned, @bitSizeOf(F));
+        const v = std.mem.readInt(Int, payload[off..][0..@sizeOf(Int)], .little);
+        @field(result, name) = @bitCast(v);
+        off += @sizeOf(Int);
+    }
+    return .{ result, payload[off..] };
+}
 
 /// The only variables the server keeps from whoever started it, so that
 /// one client's environment never leaks into another client's sessions.
@@ -228,6 +345,26 @@ test "rex protocol: frame header round trip" {
     try std.testing.expectEqual(300, info.len);
     try std.testing.expectEqual(FrameType.json, info.type);
     try std.testing.expect(parseHeader(h[0..4]) == null);
+}
+
+test "rex protocol: data frame round trip" {
+    const alloc = std.testing.allocator;
+    const frame = try encodeData(alloc, .snap, Snap{
+        .stream = 7,
+        .base_seq = 1 << 40,
+        .flags = .{ .first = true },
+    }, "bytes");
+    defer alloc.free(frame);
+    const info = parseHeader(frame).?;
+    try std.testing.expectEqual(FrameType.snap, info.type);
+    try std.testing.expectEqual(frame.len - header_len, info.len);
+
+    const fields, const tail = decodeData(Snap, frame[header_len..]).?;
+    try std.testing.expectEqual(7, fields.stream);
+    try std.testing.expectEqual(1 << 40, fields.base_seq);
+    try std.testing.expect(fields.flags.first and !fields.flags.last);
+    try std.testing.expectEqualStrings("bytes", tail);
+    try std.testing.expect(decodeData(Size, "short") == null);
 }
 
 test "rex protocol: frames over a socket pair carry peer credentials" {
