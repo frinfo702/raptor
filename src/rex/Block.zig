@@ -105,9 +105,12 @@ process: xev.Process,
 term: terminal.Terminal,
 vt: terminal.TerminalStream,
 
-/// Completions other than the read still registered with the loop.
+/// Completions still registered with the loop. The block may be destroyed
+/// only once this is zero.
 pending: usize = 0,
 exited: bool = false,
+/// The pty read is armed and counted in `pending`.
+reading: bool = false,
 
 read_c: xev.Completion = .{},
 cancel_c: xev.Completion = .{},
@@ -208,8 +211,9 @@ pub fn create(
         return err;
     };
     self.process.wait(loop, &self.process_c, Block, self, onExit);
-    self.pty_stream.read(loop, &self.read_c, .{ .slice = read_buf }, Block, self, onRead);
-    self.pending = 1;
+    self.armRead();
+    self.reading = true;
+    self.pending = 2;
 
     return self;
 }
@@ -229,8 +233,8 @@ pub fn destroy(self: *Block) void {
 }
 
 /// True once nothing for this block is left on the loop.
-pub fn isDone(self: *Block) bool {
-    return self.pending == 0 and self.read_c.state() == .dead;
+pub fn isDone(self: *const Block) bool {
+    return self.pending == 0;
 }
 
 /// Close the pane: hang up the child's process group and stop reading the
@@ -239,7 +243,7 @@ pub fn isDone(self: *Block) bool {
 pub fn kill(self: *Block) void {
     // The child called setsid, so its process group id is its pid.
     if (!self.exited) posix.kill(-self.pid, .HUP) catch |err| log.warn("killing child failed err={}", .{err});
-    if (self.read_c.state() == .dead or self.cancel_c.state() == .active) return;
+    if (!self.reading or self.cancel_c.state() == .active) return;
     if (comptime xev.dynamic) switch (xev.backend) {
         inline else => |tag| {
             self.cancel_c.ensureTag(tag);
@@ -268,6 +272,8 @@ fn cancelReadOn(
         .callback = (struct {
             fn cb(ud: ?*anyopaque, _: *api.Loop, _: *api.Completion, _: api.Result) api.CallbackAction {
                 const b: *Block = @ptrCast(@alignCast(ud.?));
+                // A read canceled before it was submitted never calls onRead.
+                b.endRead();
                 b.pending -= 1;
                 return .disarm;
             }
@@ -322,16 +328,35 @@ fn onRead(
     const self = self_.?;
     const n = r catch |err| switch (err) {
         // A spurious wakeup: libxev reports EAGAIN this way.
-        error.MissingKevent => return .rearm,
+        error.MissingKevent => 0,
         // EOF, or EIO on macOS: every holder of the slave has closed it.
         // Or `kill()` canceled the read.
         else => {
             if (err != error.EOF and err != error.Canceled) log.debug("pty read ended err={}", .{err});
+            self.endRead();
             return .disarm;
         },
     };
-    self.processOutput(buf.slice[0..n]);
-    return .rearm;
+    if (n > 0) self.processOutput(buf.slice[0..n]);
+    if (self.cancel_c.state() == .active) {
+        self.endRead();
+        return .disarm;
+    }
+    // Arm a fresh read rather than rearm: kqueue can leave a rearmed
+    // completion marked dead while it is still registered, and a cancel
+    // ignores dead completions.
+    self.armRead();
+    return .disarm;
+}
+
+fn armRead(self: *Block) void {
+    self.pty_stream.read(self.loop, &self.read_c, .{ .slice = self.read_buf }, Block, self, onRead);
+}
+
+fn endRead(self: *Block) void {
+    if (!self.reading) return;
+    self.reading = false;
+    self.pending -= 1;
 }
 
 fn onExit(
@@ -575,23 +600,31 @@ test "rex Block: kill frees a block whose descendant keeps the pty open" {
     if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
     const testing = std.testing;
 
-    const Ignore = struct {
-        fn onEvent(_: *Block, _: Event) void {}
+    const Recorder = struct {
+        fn onEvent(block: *Block, event: Event) void {
+            if (event == .output) {
+                const outputs: *usize = @ptrCast(@alignCast(block.userdata.?));
+                outputs.* += 1;
+            }
+        }
     };
+    var outputs: usize = 0;
 
     var loop = try xev.Loop.init(.{});
     defer loop.deinit();
     var read_buf: ReadBuffer = undefined;
 
     const block = try Block.create(testing.allocator, &loop, &read_buf, .{
-        .args = &.{ "/bin/sh", "-c", "(trap '' HUP; exec sleep 30) & sleep 30" },
-        .on_event = &Ignore.onEvent,
+        .args = &.{ "/bin/sh", "-c", "echo started; (trap '' HUP; while :; do sleep 0.05; echo x; done) & sleep 30" },
+        .on_event = &Recorder.onEvent,
+        .userdata = &outputs,
     });
     defer block.destroy();
     // The survivor ignores the hangup but shares the child's process group.
     defer posix.kill(-block.pid, .KILL) catch {};
 
-    // Let the child start its survivor before the pane is closed.
+    // Output already waiting when the loop first runs is read at once,
+    // and the survivor is running before the pane is closed.
     try std.Io.sleep(testing.io, .fromMilliseconds(200), .awake);
     try loop.run(.no_wait);
     block.kill();
@@ -601,6 +634,14 @@ test "rex Block: kill frees a block whose descendant keeps the pty open" {
         try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
         try loop.run(.no_wait);
     }
+
+    // Nothing reads the pty anymore, though the survivor keeps writing.
+    outputs = 0;
+    for (0..20) |_| {
+        try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
+        try loop.run(.no_wait);
+    }
+    try testing.expectEqual(@as(usize, 0), outputs);
 }
 
 test "rex Block: a full reset clears the title" {
