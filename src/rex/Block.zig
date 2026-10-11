@@ -118,6 +118,8 @@ vt: terminal.TerminalStream,
 /// only once this is zero.
 pending: usize = 0,
 exited: bool = false,
+/// `kill()` was called before the child exited.
+killed: bool = false,
 /// The pty read is armed and counted in `pending`.
 reading: bool = false,
 
@@ -251,9 +253,12 @@ pub fn isDone(self: *const Block) bool {
 /// pty, so a descendant that keeps the slave open can't keep the block
 /// alive. The exit arrives later as `child_exited`.
 pub fn kill(self: *Block) void {
+    if (self.exited) return self.stopRead();
     // The child called setsid, so its process group id is its pid.
-    if (!self.exited) posix.kill(-self.pid, .HUP) catch |err| log.warn("killing child failed err={}", .{err});
-    self.stopRead();
+    posix.kill(-self.pid, .HUP) catch |err| log.warn("killing child failed err={}", .{err});
+    // macOS doesn't finish a session leader's exit until its unread tty
+    // output drains, so the read stops only once the exit arrives.
+    self.killed = true;
 }
 
 /// Remove the read through the loop. The read is never disarmed from its
@@ -422,6 +427,7 @@ fn onExit(
     }
 
     self.emit(.{ .child_exited = .{ .exit_code = exit_code } });
+    if (self.killed) self.stopRead();
     return .disarm;
 }
 
@@ -757,4 +763,45 @@ test "rex Block: busy blocks sharing a read buffer get only their own output" {
     try testing.expectEqual(@as(usize, 0), rec_b.foreign);
     try testing.expectEqual(@as(usize, 15 * 20000), rec_a.bytes);
     try testing.expectEqual(@as(usize, 20000), rec_b.bytes);
+}
+
+test "rex Block: effects from a real child become events" {
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const testing = std.testing;
+
+    const Recorder = struct {
+        seen: std.EnumSet(std.meta.Tag(Event)) = .empty,
+        pwd: [32]u8 = @splat(0),
+        exit_code: ?u32 = null,
+
+        fn onEvent(block: *Block, event: Event) void {
+            const r: *@This() = @ptrCast(@alignCast(block.userdata.?));
+            r.seen.insert(std.meta.activeTag(event));
+            switch (event) {
+                .pwd_changed => |p| @memcpy(r.pwd[0..p.len], p),
+                .child_exited => |e| r.exit_code = e.exit_code,
+                else => {},
+            }
+        }
+    };
+    var rec: Recorder = .{};
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+    var read_buf: ReadBuffer = undefined;
+
+    // OSC 7 pwd, BEL, OSC 9 notification, OSC 9;4 progress, OSC 52
+    // clipboard, OSC 7501 program status.
+    const block = try Block.create(testing.allocator, &loop, &read_buf, .{
+        .args = &.{ "/bin/sh", "-c", "printf '\\033]7;file://localhost/tmp\\007\\007\\033]9;hi there\\007\\033]9;4;1;50\\007\\033]52;c;aGVsbG8=\\007\\033]7501;state=working:app=probe\\033\\\\'; sleep 0.3; exit 7" },
+        .on_event = &Recorder.onEvent,
+        .userdata = &rec,
+    });
+    defer block.destroy();
+    while (!block.isDone()) try loop.run(.once);
+
+    for ([_]std.meta.Tag(Event){ .bell, .desktop_notification, .progress_report, .clipboard_write, .program_status }) |t|
+        try testing.expect(rec.seen.contains(t));
+    try testing.expectEqualStrings("file://localhost/tmp", std.mem.sliceTo(&rec.pwd, 0));
+    try testing.expectEqual(@as(?u32, 7), rec.exit_code);
 }
