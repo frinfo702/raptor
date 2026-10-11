@@ -289,11 +289,13 @@ const Ctx = struct {
     };
 
     /// The target flags, defaulting to the session and block this runs in.
+    /// A block id or label is looked up in every session.
     fn target(self: *Ctx) Target {
         const a = self.args;
         const none = a.session == null and a.window == null and a.block == null;
+        const by_name = if (a.block) |b| std.meta.isError(std.fmt.parseInt(usize, b, 10)) else false;
         return .{
-            .session = a.session orelse self.env.get("RAP_SESSION"),
+            .session = a.session orelse if (by_name) null else self.env.get("RAP_SESSION"),
             .window = a.window,
             .block = if (none) self.env.get("RAP_BLOCK") else a.block,
         };
@@ -534,8 +536,8 @@ const Ctx = struct {
         if (words.len < 2 or !std.mem.eql(u8, words[1], "inspect") or words.len > 3)
             return self.usageError("usage: rap " ++ kind ++ " inspect [" ++ kind ++ "]", .{});
         if (try self.connect(false) == null) return .unreachable_server;
-        var t = self.target();
-        if (words.len == 3) @field(t, kind) = words[2];
+        if (words.len == 3) @field(self.args, kind) = words[2];
+        const t = self.target();
         const method = if (comptime std.mem.eql(u8, kind, "session")) "session.view" else "session.describe_block";
         const r = switch (try self.call(method, t)) {
             .result => |v| v,

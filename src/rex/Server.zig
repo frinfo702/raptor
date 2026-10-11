@@ -149,12 +149,16 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
         const dirz = try alloc.dupeSentinel(u8, dir, 0);
         defer alloc.free(dirz);
         if (c.mkdir(dirz, 0o700) != 0 and posix.errno(-1) != .EXIST) return error.SocketDir;
-        const dir_fd = c.open(dirz, .{ .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true });
-        if (dir_fd < 0) return error.SocketDir;
-        defer _ = c.close(dir_fd);
-        var st: c.Stat = undefined;
-        if (c.fstat(dir_fd, &st) != 0) return error.SocketDir;
-        if (st.uid != c.getuid() or st.mode & 0o022 != 0) return error.SocketDirUnsafe;
+        const default = try protocol.defaultSocketPath(alloc, opts.env);
+        defer alloc.free(default);
+        if (std.mem.eql(u8, path, default)) {
+            const dir_fd = c.open(dirz, .{ .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true });
+            if (dir_fd < 0) return error.SocketDir;
+            defer _ = c.close(dir_fd);
+            var st: c.Stat = undefined;
+            if (c.fstat(dir_fd, &st) != 0) return error.SocketDir;
+            if (st.uid != c.getuid() or st.mode & 0o022 != 0) return error.SocketDirUnsafe;
+        }
     }
 
     // Only the lock holder may touch the socket path, so a stale socket

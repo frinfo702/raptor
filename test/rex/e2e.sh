@@ -14,9 +14,13 @@ export RAP_SERVER="$tmp/s.sock"
 export HOME="$tmp"
 unset XDG_STATE_HOME RAP_SESSION RAP_BLOCK RAP_AUTOSTART
 
+# A socket directly in /tmp, which other users can write to.
+shared_sock=/tmp/rap-e2e-$$.sock
+
 cleanup() {
   "$RAP" server stop >/dev/null 2>&1 || true
-  rm -rf "$tmp"
+  "$RAP" -S "$shared_sock" server stop >/dev/null 2>&1 || true
+  rm -rf "$tmp" "$shared_sock" "$shared_sock.lock"
 }
 trap cleanup EXIT
 
@@ -60,11 +64,21 @@ wait_capture demo hi
 "$RAP" send -s other 'echo "foo=[$FOO] block=$RAP_BLOCK"\n'
 wait_capture other 'block=block:'
 "$RAP" capture -s other | grep -q 'foo=\[\]' || fail "FOO leaked into a later session"
+
+# From inside a block of demo, a block id still reaches other sessions.
+other_block=$("$RAP" run -s other -- /bin/sh -c 'sleep 30')
+expect_status 0 env RAP_SESSION=demo "$RAP" capture -b "$other_block"
+expect_status 0 env RAP_SESSION=demo "$RAP" block inspect "$other_block"
 "$RAP" kill other
 
 # Only one server per socket.
 expect_status 1 "$RAP" server run
 grep -q "already running" "$tmp/err" || fail "second server did not say already running"
+
+# An explicit socket path in a shared directory is allowed.
+"$RAP" -S "$shared_sock" new shared -- /bin/sh >/dev/null || fail "server on $shared_sock"
+"$RAP" -S "$shared_sock" ls | grep -q shared || fail "rap ls on $shared_sock"
+"$RAP" -S "$shared_sock" server stop
 
 # Missing targets exit 3.
 expect_status 3 "$RAP" capture -s nope
