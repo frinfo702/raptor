@@ -51,10 +51,16 @@ pub fn init(
     test_exe.root_module.addImport("build_options", options);
     test_exe.root_module.addImport("ghostty-vt", mod.vt);
 
+    const install_step = b.addInstallArtifact(exe, .{});
+    cfg.addPatchElf(exe, &install_step.step);
+
+    const test_run = b.addRunArtifact(test_exe);
+    cfg.addPatchElf(test_exe, &test_run.step);
+
     return .{
         .exe = exe,
-        .install_step = b.addInstallArtifact(exe, .{}),
-        .test_run = b.addRunArtifact(test_exe),
+        .install_step = install_step,
+        .test_run = test_run,
     };
 }
 
