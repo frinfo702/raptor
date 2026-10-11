@@ -25,11 +25,16 @@ const log = std.log.scoped(.rex_block);
 /// The buffer every block on a loop reads its pty into. One read is at most
 /// this large, so a busy block yields to the others after each read.
 ///
-/// Sharing it is safe because libxev's kqueue backend performs each read
-/// and runs its callback before it performs the next one.
-// ponytail: io_uring runs reads concurrently, so a Linux server using it
-// needs a buffer per block or readiness-based reads.
+/// Sharing it is safe on kqueue because libxev only reports readiness
+/// there and the block reads in its callback, right before it processes
+/// the bytes.
+// ponytail: other backends read into it before the callback, and io_uring
+// even concurrently, so a Linux server needs a buffer per block.
 pub const ReadBuffer = [64 * 1024]u8;
+
+/// libxev's kqueue backend reports readiness without reading when given
+/// an empty buffer.
+const kqueue = if (xev.dynamic) false else xev.backend == .kqueue;
 
 /// The default scrollback limit, sized to hold at least 10,000 lines of
 /// history at 80 columns. One 400 KiB page holds about 600 rows there, and
@@ -211,7 +216,8 @@ pub fn create(
         return err;
     };
     self.process.wait(loop, &self.process_c, Block, self, onExit);
-    self.armRead();
+    const buf = if (comptime kqueue) read_buf[0..0] else read_buf;
+    self.pty_stream.read(loop, &self.read_c, .{ .slice = buf }, Block, self, onRead);
     self.reading = true;
     self.pending = 2;
 
@@ -221,7 +227,9 @@ pub fn create(
 /// Free the block. Nothing for it may be left on the loop, i.e. `isDone()`.
 /// That happens once the child has exited and either every holder of the
 /// pty slave has closed it or `kill()` stopped the read; call `kill()` and
-/// run the loop to get there.
+/// run the loop to get there. Run it with `.once` or `.until_done` while
+/// writes are queued: under `.no_wait` libxev's kqueue backend can leave a
+/// finished write registered.
 pub fn destroy(self: *Block) void {
     std.debug.assert(self.isDone());
     const alloc = self.alloc;
@@ -239,10 +247,17 @@ pub fn isDone(self: *const Block) bool {
 
 /// Close the pane: hang up the child's process group and stop reading the
 /// pty, so a descendant that keeps the slave open can't keep the block
-/// alive. The exit arrives later as `child_exited`. Not for `on_event`.
+/// alive. The exit arrives later as `child_exited`.
 pub fn kill(self: *Block) void {
     // The child called setsid, so its process group id is its pid.
     if (!self.exited) posix.kill(-self.pid, .HUP) catch |err| log.warn("killing child failed err={}", .{err});
+    self.stopRead();
+}
+
+/// Remove the read through the loop. The read is never disarmed from its
+/// callback: libxev's kqueue backend can drop that removal under
+/// `.no_wait`, leaving the pty registered.
+fn stopRead(self: *Block) void {
     if (!self.reading or self.cancel_c.state() == .active) return;
     if (comptime xev.dynamic) switch (xev.backend) {
         inline else => |tag| {
@@ -320,7 +335,7 @@ fn childPreExec(cmd: *Command) ?u8 {
 fn onRead(
     self_: ?*Block,
     _: *xev.Loop,
-    _: *xev.Completion,
+    c: *xev.Completion,
     _: xev.Stream,
     buf: xev.ReadBuffer,
     r: xev.ReadError!usize,
@@ -328,29 +343,41 @@ fn onRead(
     const self = self_.?;
     const n = r catch |err| switch (err) {
         // A spurious wakeup: libxev reports EAGAIN this way.
-        error.MissingKevent => 0,
-        // EOF, or EIO on macOS: every holder of the slave has closed it.
-        // Or `kill()` canceled the read.
-        else => {
-            if (err != error.EOF and err != error.Canceled) log.debug("pty read ended err={}", .{err});
+        error.MissingKevent => return rearm(c),
+        error.Canceled => {
             self.endRead();
             return .disarm;
         },
+        else => return self.readEnded(c, err),
     };
-    if (n > 0) self.processOutput(buf.slice[0..n]);
-    if (self.cancel_c.state() == .active) {
-        self.endRead();
-        return .disarm;
-    }
-    // Arm a fresh read rather than rearm: kqueue can leave a rearmed
-    // completion marked dead while it is still registered, and a cancel
-    // ignores dead completions.
-    self.armRead();
-    return .disarm;
+    const data = if (comptime kqueue) data: {
+        const len = posix.read(self.pty.master, self.read_buf) catch |err| switch (err) {
+            error.WouldBlock => return rearm(c),
+            else => return self.readEnded(c, err),
+        };
+        if (len == 0) return self.readEnded(c, error.EOF);
+        break :data self.read_buf[0..len];
+    } else buf.slice[0..n];
+    self.processOutput(data);
+    return rearm(c);
 }
 
-fn armRead(self: *Block) void {
-    self.pty_stream.read(self.loop, &self.read_c, .{ .slice = self.read_buf }, Block, self, onRead);
+/// EOF, or EIO on macOS: every holder of the slave has closed it.
+fn readEnded(self: *Block, c: *xev.Completion, err: anyerror) xev.CallbackAction {
+    if (err != error.EOF) log.debug("pty read ended err={}", .{err});
+    self.stopRead();
+    return rearm(c);
+}
+
+fn rearm(c: *xev.Completion) xev.CallbackAction {
+    // kqueue leaves a read it performed at submit time marked dead and
+    // holding its result when it is rearmed, though it stays registered,
+    // and a cancel ignores it in either state.
+    if (comptime kqueue) {
+        c.flags.state = .active;
+        c.result = null;
+    }
+    return .rearm;
 }
 
 fn endRead(self: *Block) void {
@@ -676,4 +703,56 @@ test "rex Block: a full reset clears the title" {
     try testing.expectEqualStrings("", std.mem.sliceTo(&title, 0));
 
     try loop.run(.until_done);
+}
+
+test "rex Block: busy blocks sharing a read buffer get only their own output" {
+    if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
+    const testing = std.testing;
+
+    const Recorder = struct {
+        own: u8,
+        bytes: usize = 0,
+        foreign: usize = 0,
+
+        fn onEvent(block: *Block, event: Event) void {
+            const r: *@This() = @ptrCast(@alignCast(block.userdata.?));
+            if (event != .output) return;
+            for (event.output) |ch| switch (ch) {
+                '\r', '\n' => {},
+                else => if (ch == r.own) {
+                    r.bytes += 1;
+                } else {
+                    r.foreign += 1;
+                },
+            };
+        }
+    };
+    var rec_a: Recorder = .{ .own = 'a' };
+    var rec_b: Recorder = .{ .own = 'b' };
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+    var read_buf: ReadBuffer = undefined;
+
+    const a = try Block.create(testing.allocator, &loop, &read_buf, .{
+        .args = &.{ "/bin/sh", "-c", "yes aaaaaaaaaaaaaaa | head -n 20000" },
+        .on_event = &Recorder.onEvent,
+        .userdata = &rec_a,
+    });
+    defer a.destroy();
+    const b = try Block.create(testing.allocator, &loop, &read_buf, .{
+        .args = &.{ "/bin/sh", "-c", "yes b | head -n 20000" },
+        .on_event = &Recorder.onEvent,
+        .userdata = &rec_b,
+    });
+    defer b.destroy();
+
+    // Both ptys hold output before the loop first registers their reads.
+    try std.Io.sleep(testing.io, .fromMilliseconds(200), .awake);
+    while (!a.isDone() or !b.isDone()) try loop.run(.once);
+
+    try testing.expectEqual(@as(usize, 0), rec_a.foreign);
+    try testing.expectEqual(@as(usize, 0), rec_b.foreign);
+    try testing.expectEqual(@as(usize, 15 * 20000), rec_a.bytes);
+    try testing.expectEqual(@as(usize, 20000), rec_b.bytes);
 }
