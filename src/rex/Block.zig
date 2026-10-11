@@ -349,13 +349,15 @@ fn onRead(
 ) xev.CallbackAction {
     const self = self_.?;
     const n = r catch |err| switch (err) {
-        // A spurious wakeup: libxev reports EAGAIN this way.
-        error.MissingKevent => return rearm(c),
         error.Canceled => {
             self.endRead();
             return .disarm;
         },
-        else => return self.readEnded(c, err),
+        else => {
+            // A spurious wakeup: libxev's kqueue reports EAGAIN this way.
+            if (comptime kqueue) if (err == error.MissingKevent) return rearm(c);
+            return self.readEnded(c, err);
+        },
     };
     const data = if (comptime kqueue) data: {
         const len = posix.read(self.pty.master, self.read_buf) catch |err| switch (err) {
