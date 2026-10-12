@@ -200,22 +200,45 @@ pub const Pending = struct {
         self.lock.lockUncancelable(global.io());
         defer self.lock.unlock(global.io());
         if (self.msgs.items.len == 0 and mailbox.push(msg, .{ .instant = {} }) != 0) return;
-        // Only the latest of these matters. ponytail: other kinds queue
-        // without a bound; cap them if a program can flood one.
-        switch (msg) {
-            .set_title, .pwd_change, .ring_bell, .set_mouse_shape, .progress_report => {
-                for (self.msgs.items, 0..) |m, i| if (std.meta.activeTag(m) == std.meta.activeTag(msg)) {
-                    self.msgs.orderedRemove(i).deinit();
-                    break;
-                };
-            },
-            else => {},
-        }
+        for (self.msgs.items, 0..) |m, i| if (supersedes(msg, m)) {
+            self.msgs.orderedRemove(i).deinit();
+            break;
+        };
+        // ponytail: past `cap` waiting messages the oldest go, which can
+        // lose a clipboard request or a color; raise it if that matters.
+        if (self.msgs.items.len >= cap) for (self.msgs.items, 0..) |m, i| if (m != .child_exited) {
+            self.msgs.orderedRemove(i).deinit();
+            break;
+        };
         self.msgs.append(alloc, msg) catch {
             log.warn("out of memory, dropping surface message {t}", .{msg});
             return msg.deinit();
         };
         mailbox.app.rt_app.wakeup();
+    }
+
+    pub const cap = 256;
+
+    /// Whether `new` makes `old` pointless to deliver: only the latest
+    /// state of a kind (per color or clipboard) matters.
+    fn supersedes(new: apprt.surface.Message, old: apprt.surface.Message) bool {
+        return switch (new) {
+            .set_title,
+            .pwd_change,
+            .ring_bell,
+            .set_mouse_shape,
+            .progress_report,
+            .report_title,
+            .resize_window,
+            .clipboard_read,
+            => std.meta.activeTag(old) == std.meta.activeTag(new),
+            .start_command, .stop_command => old == .start_command or old == .stop_command,
+            .color_change => |c| old == .color_change and std.meta.eql(old.color_change.target, c.target),
+            .clipboard_write => |w| old == .clipboard_write and old.clipboard_write.clipboard_type == w.clipboard_type,
+            .kitty_clipboard_read => |r| old == .kitty_clipboard_read and old.kitty_clipboard_read.location == r.location,
+            .kitty_clipboard_write => |w| old == .kitty_clipboard_write and old.kitty_clipboard_write.location == w.location,
+            else => false,
+        };
     }
 
     /// Move waiting messages into the app's mailbox while it has room.

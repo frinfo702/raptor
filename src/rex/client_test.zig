@@ -356,6 +356,64 @@ test "rex client: an external surface gets the exit after a full app mailbox" {
     return error.Timeout;
 }
 
+test "rex client: an external surface's waiting messages stay bounded" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const apprt = @import("../apprt.zig");
+    if (comptime apprt.runtime != apprt.none) return error.SkipZigTest;
+    const External = @import("../termio.zig").External;
+    var h: Harness = undefined;
+    try h.start();
+    defer h.stop();
+    const client = try Client.connect(alloc, testing.io, h.path, null);
+    defer client.deinit();
+    (try call(client, .{ .method = "session.subscribe", .params = .{} })).deinit();
+
+    const block = block: {
+        const r = try call(client, .{ .method = "session.create", .params = .{
+            .cols = 80,
+            .rows = 24,
+            .command = [_][]const u8{ "/bin/sh", "-c", "read x; i=0; while [ $i -lt 500 ]; do printf '\\033]133;C\\007\\033]133;D;0\\007\\033]4;1;rgb:ff/00/00\\007\\033]10;rgb:00/ff/00\\007\\033]11;rgb:00/00/ff\\007\\033]52;c;aGk=\\007'; i=$((i+1)); done; exit 3" },
+        } });
+        defer r.deinit();
+        break :block try alloc.dupe(u8, result(r).object.get("block").?.string);
+    };
+    defer alloc.free(block);
+
+    const b = try client.newBinding();
+    var s: External.TestSurface = undefined;
+    try s.initWith(.{ .userdata = b, .write_cb = Client.Binding.onWrite });
+    defer s.deinit();
+    try client.bind(b, block, External.sink(&s.io));
+    defer client.unbind(b);
+
+    // The app doesn't look at its mailbox until the exit is waiting.
+    try s.write("go\n");
+    const pending = &s.io.terminal_stream.handler.surface_pending.?;
+    for (0..1000) |_| {
+        {
+            pending.lock.lockUncancelable(testing.io);
+            defer pending.lock.unlock(testing.io);
+            const items = pending.msgs.items;
+            if (items.len > 0 and items[items.len - 1] == .child_exited) {
+                try testing.expect(items.len <= External.Pending.cap);
+                break;
+            }
+        }
+        try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
+    } else return error.Timeout;
+
+    for (0..1000) |_| {
+        while (s.app_mailbox.pop(testing.io)) |msg| {
+            const m = msg.surface_message.message;
+            defer m.deinit();
+            if (m == .child_exited) return testing.expectEqual(3, m.child_exited.exit_code);
+        }
+        External.flushPending(&s.io);
+        try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
+    }
+    return error.Timeout;
+}
+
 test "rex client: a pane the app isn't draining never holds up the others" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     const apprt = @import("../apprt.zig");
