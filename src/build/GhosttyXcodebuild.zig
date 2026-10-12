@@ -19,6 +19,8 @@ pub const Deps = struct {
     docs: *const Docs,
     i18n: ?*const I18n,
     resources: *const Resources,
+    /// The rap helper to bundle in the app.
+    rap: ?*std.Build.Step.Compile = null,
 };
 
 pub fn init(
@@ -49,7 +51,7 @@ pub fn init(
     };
 
     const env = b.graph.environ_map;
-    const app_path = b.fmt("macos/build/{s}/Ghostty.app", .{xc_config});
+    const app_path = b.fmt("macos/build/{s}/Raptor.app", .{xc_config});
 
     // Our step to build the Ghostty macOS app.
     const build = build: {
@@ -74,6 +76,7 @@ pub fn init(
         // If we have a specific architecture, we need to pass it
         // to xcodebuild.
         if (xc_arch) |arch| step.addArgs(&.{ "-arch", arch });
+        if (deps.rap) |rap| step.addPrefixedFileArg("RAP_HELPER=", rap.getEmittedBin());
 
         // We need the xcframework
         deps.xcframework.addStepDependencies(&step.step);
@@ -108,6 +111,7 @@ pub fn init(
             "GhosttyUITests",
         });
         if (xc_arch) |arch| step.addArgs(&.{ "-arch", arch });
+        if (deps.rap) |rap| step.addPrefixedFileArg("RAP_HELPER=", rap.getEmittedBin());
 
         // We need the xcframework
         deps.xcframework.addStepDependencies(&step.step);
@@ -143,7 +147,7 @@ pub fn init(
         open.has_side_effects = true;
         open.cwd = b.path("");
         open.addArgs(&.{b.fmt(
-            "{s}/Contents/MacOS/ghostty",
+            "{s}/Contents/MacOS/raptor",
             .{app_path},
         )});
 

@@ -375,7 +375,9 @@ class AppDelegate: NSObject,
             //   - if we're restoring from persisted state
             if TerminalController.all.isEmpty && derivedConfig.initialWindow {
                 undoManager.disableUndoRegistration()
-                _ = TerminalController.newWindow(ghostty)
+                if !RaptorClient.openSessions(ghostty) {
+                    _ = TerminalController.newWindow(ghostty)
+                }
                 undoManager.enableUndoRegistration()
             }
         }
@@ -468,7 +470,9 @@ class AppDelegate: NSObject,
         }
 
         // No visible windows, open a new one.
-        _ = TerminalController.newWindow(ghostty)
+        if !RaptorClient.openSessions(ghostty) {
+            _ = TerminalController.newWindow(ghostty)
+        }
         return false
     }
 

@@ -969,6 +969,10 @@ pub fn deactivateInspector(self: *Surface) void {
 /// True if the surface requires confirmation to quit. This should be called
 /// by apprt to determine if the surface should confirm before quitting.
 pub fn needsConfirmQuit(self: *Surface) bool {
+    // A server-driven surface's processes live on the server: closing the
+    // surface or quitting only detaches, and kills nothing.
+    if (self.io.backend == .external) return false;
+
     // If the surface is in read-only mode, always require confirmation
     if (self.readonly) return true;
 

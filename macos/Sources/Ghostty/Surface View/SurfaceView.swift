@@ -599,6 +599,9 @@ extension Ghostty {
         /// Context for surface creation
         var context: ghostty_surface_context_e = GHOSTTY_SURFACE_CONTEXT_WINDOW
 
+        /// A rap client whose blocks the surface can show instead of running a command.
+        var rapClient: rap_client_t?
+
         init() {}
 
         init(from config: ghostty_surface_config_s) {
@@ -642,6 +645,8 @@ extension Ghostty {
 
             // Set context
             config.context = context
+
+            if let rapClient { rap_client_surface_config(rapClient, &config) }
 
             // Use withCString to ensure strings remain valid for the duration of the closure
             return try workingDirectory.withCString { cWorkingDir in

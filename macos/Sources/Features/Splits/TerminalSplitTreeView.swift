@@ -46,6 +46,7 @@ struct TerminalSplitTreeView: View {
 
 private struct TerminalSplitSubtreeView: View {
     @EnvironmentObject var ghostty: Ghostty.App
+    @Environment(\.splitDividerColor) private var dividerColorOverride
 
     let node: SplitTree<Ghostty.SurfaceView>.Node
     var isRoot: Bool = false
@@ -69,7 +70,7 @@ private struct TerminalSplitSubtreeView: View {
                 }, set: {
                     action(.resize(.init(node: node, ratio: $0)))
                 }),
-                dividerColor: ghostty.config.splitDividerColor,
+                dividerColor: dividerColorOverride ?? ghostty.config.splitDividerColor,
                 resizeIncrements: .init(width: 1, height: 1),
                 left: {
                     TerminalSplitSubtreeView(node: split.left, action: action)
@@ -253,5 +254,17 @@ enum TerminalSplitDropZone: String, Equatable {
                     .frame(width: geometry.size.width / 2)
             }
         }
+    }
+}
+
+private struct SplitDividerColorKey: EnvironmentKey {
+    static let defaultValue: Color? = nil
+}
+
+extension EnvironmentValues {
+    /// Overrides the configured split divider colour.
+    var splitDividerColor: Color? {
+        get { self[SplitDividerColorKey.self] }
+        set { self[SplitDividerColorKey.self] = newValue }
     }
 }
