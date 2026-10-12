@@ -31,7 +31,10 @@ const Block = @import("Block.zig");
 const dataplane = @import("dataplane.zig");
 const ids = @import("ids.zig");
 const layout = @import("layout.zig");
+const listdir = @import("listdir.zig");
+const proc = @import("proc.zig");
 const protocol = @import("protocol.zig");
+const program_status = @import("../terminal/osc/parsers/program_status.zig");
 
 const log = std.log.scoped(.rex_server);
 
@@ -98,6 +101,15 @@ const Pane = struct {
     title: std.ArrayList(u8) = .empty,
     pwd: std.ArrayList(u8) = .empty,
     exit_code: ?u32 = null,
+    /// What the program says it is doing, for Activity Mode.
+    status: ?Status = null,
+    status_msg: std.ArrayList(u8) = .empty,
+    /// Wall-clock ms of the latest output.
+    last_activity: ?i64 = null,
+    /// The foreground process at the latest tick, to notice it change.
+    fg_pid: ?posix.pid_t = null,
+    fg_name: [proc.max_name]u8 = undefined,
+    fg_name_len: usize = 0,
     /// Requests answered when the child exits.
     waiters: std.ArrayList(Waiter) = .empty,
     /// Data-plane subscriptions to this block.
@@ -116,6 +128,19 @@ const Pane = struct {
     compressed: ?u64 = null,
     /// In the server's `compress_queue`.
     queued: bool = false,
+};
+
+/// A block's program status. While working or blocked, a status from an
+/// OSC 7501 report holds against one inferred from a spinner in the
+/// title, which holds against one from OSC 9;4 progress.
+// ponytail: one record per block, not one per OSC 7501 id; keep a map
+// when a program reports several records at once.
+const Status = struct {
+    state: []const u8,
+    kind: ?[]const u8 = null,
+    progress: ?u8 = null,
+    source: enum { osc7501, title, progress },
+    updated_at: i64,
 };
 
 /// One client's subscription to one block.
@@ -322,6 +347,11 @@ fn nowMs(self: *const Server) i64 {
     return std.Io.Clock.awake.now(self.io).toMilliseconds();
 }
 
+/// Milliseconds since the Unix epoch, for timestamps clients show.
+fn wallMs(self: *const Server) i64 {
+    return std.Io.Clock.real.now(self.io).toMilliseconds();
+}
+
 fn unlinkSocket(self: *Server) void {
     if (self.socket_unlinked) return;
     self.socket_unlinked = true;
@@ -349,7 +379,7 @@ fn onTick(
             self.stopping = true;
         }
     } else self.idle_since = null;
-    for (self.sessions.items) |s| for (s.windows.items) |w| self.queueQuiet(w.tree.root);
+    for (self.sessions.items) |s| for (s.windows.items) |w| self.tickTree(w.tree.root);
     self.armCompress();
     // The tick also bounds how long a loop iteration can wait while
     // shutting down.
@@ -357,25 +387,49 @@ fn onTick(
     return .disarm;
 }
 
-/// Queue the blocks whose terminal had no compression activity since the
-/// last tick and has not been compressed since its last activity.
-fn queueQuiet(self: *Server, node: *Tree.Node) void {
+fn tickTree(self: *Server, node: *Tree.Node) void {
     switch (node.*) {
         .leaf => |pane| {
-            const activity = pane.block.term.compressionActivity();
-            if (pane.activity != activity) {
-                pane.activity = activity;
-                return;
-            }
-            if (pane.queued or pane.compressed == activity) return;
-            self.compress_queue.append(self.alloc, pane) catch return;
-            pane.queued = true;
+            self.pollForeground(pane);
+            self.queueQuiet(pane);
         },
         .split => |s| {
-            self.queueQuiet(s.a);
-            self.queueQuiet(s.b);
+            self.tickTree(s.a);
+            self.tickTree(s.b);
         },
     }
+}
+
+/// Queue the block if its terminal had no compression activity since the
+/// last tick and has not been compressed since its last activity.
+fn queueQuiet(self: *Server, pane: *Pane) void {
+    const activity = pane.block.term.compressionActivity();
+    if (pane.activity != activity) {
+        pane.activity = activity;
+        return;
+    }
+    if (pane.queued or pane.compressed == activity) return;
+    self.compress_queue.append(self.alloc, pane) catch return;
+    pane.queued = true;
+}
+
+/// Report a new foreground process. The name is compared too, so a
+/// process that execs (or a job seen between its fork and exec) is
+/// reported again once it runs its program.
+// ponytail: polled each tick, so a change shows up to `tick_ms` late.
+fn pollForeground(self: *Server, pane: *Pane) void {
+    const pid = proc.foreground(pane.block.pty.master) orelse return;
+    var buf: [proc.max_name]u8 = undefined;
+    const name = proc.name(pid, &buf) orelse "";
+    if (pane.fg_pid == pid and std.mem.eql(u8, pane.fg_name[0..pane.fg_name_len], name)) return;
+    pane.fg_pid = pid;
+    @memcpy(pane.fg_name[0..name.len], name);
+    pane.fg_name_len = name.len;
+
+    var arena: std.heap.ArenaAllocator = .init(self.alloc);
+    defer arena.deinit();
+    const info = proc.describe(arena.allocator(), pid) catch return;
+    self.emit("process_changed", &pane.session_id, .{ .block = prefixed("block", &pane.id), .foreground = info });
 }
 
 fn armCompress(self: *Server) void {
@@ -735,12 +789,16 @@ fn onBlockEvent(block: *Block, event: Block.Event) void {
     const self = pane.server;
     const id = prefixed("block", &pane.id);
     switch (event) {
-        .output => |data| self.forwardOutput(pane, data),
+        .output => |data| {
+            pane.last_activity = self.wallMs();
+            self.forwardOutput(pane, data);
+        },
         .write_pty => {},
         .title_changed => |t| {
             pane.title.clearRetainingCapacity();
             pane.title.appendSlice(self.alloc, t) catch {};
             self.emit("title_changed", &pane.session_id, .{ .block = id, .title = t });
+            self.titleStatus(pane, t);
         },
         .pwd_changed => |p| {
             pane.pwd.clearRetainingCapacity();
@@ -753,16 +811,28 @@ fn onBlockEvent(block: *Block, event: Block.Event) void {
             .title = n.title,
             .body = n.body,
         }),
-        .progress_report => |p| self.emit("progress_report", &pane.session_id, .{
-            .block = id,
-            .state = @tagName(p.state),
-            .progress = p.progress,
-        }),
+        .progress_report => |p| {
+            self.emit("progress_report", &pane.session_id, .{
+                .block = id,
+                .state = @tagName(p.state),
+                .progress = p.progress,
+            });
+            self.progressStatus(pane, p);
+        },
         .clipboard_write => self.emit("clipboard_written", &pane.session_id, .{ .block = id }),
-        .program_status => |p| self.emit("program_status_changed", &pane.session_id, .{
-            .block = id,
-            .state = @tagName(p.state),
-        }),
+        .program_status => |p| {
+            if (p.state == .clear) return self.setStatus(pane, null, "");
+            var buf: [program_status.max_msg_bytes]u8 = undefined;
+            var msg: std.Io.Writer = .fixed(&buf);
+            p.writeText(.msg, &msg) catch {};
+            self.setStatus(pane, .{
+                .state = @tagName(p.state),
+                .kind = if (p.readOption(.kind)) |k| @tagName(k) else null,
+                .progress = p.readOption(.progress),
+                .source = .osc7501,
+                .updated_at = self.wallMs(),
+            }, msg.buffered());
+        },
         .child_exited => |e| {
             pane.exit_code = e.exit_code;
             self.exited[self.exited_next % self.exited.len] = .{ .id = pane.id, .code = e.exit_code };
@@ -776,6 +846,131 @@ fn onBlockEvent(block: *Block, event: Block.Event) void {
             self.closePane(pane);
         },
     }
+}
+
+// Program status
+
+/// What clients see of a block's status.
+const StatusView = struct {
+    state: []const u8,
+    kind: ?[]const u8,
+    msg: ?[]const u8,
+    progress: ?u8,
+    source: ?[]const u8,
+    updated_at: i64,
+};
+
+fn statusView(pane: *const Pane) ?StatusView {
+    const s = pane.status orelse return null;
+    return .{
+        .state = s.state,
+        .kind = s.kind,
+        .msg = if (pane.status_msg.items.len > 0) pane.status_msg.items else null,
+        .progress = s.progress,
+        .source = @tagName(s.source),
+        .updated_at = s.updated_at,
+    };
+}
+
+/// Replace the block's status, null to clear it, and report it.
+fn setStatus(self: *Server, pane: *Pane, status: ?Status, msg: []const u8) void {
+    pane.status = status;
+    pane.status_msg.clearRetainingCapacity();
+    pane.status_msg.appendSlice(self.alloc, msg) catch {};
+    const view = statusView(pane) orelse StatusView{
+        .state = "clear",
+        .kind = null,
+        .msg = null,
+        .progress = null,
+        .source = null,
+        .updated_at = self.wallMs(),
+    };
+    self.emit("program_status_changed", &pane.session_id, .{
+        .block = prefixed("block", &pane.id),
+        .state = view.state,
+        .kind = view.kind,
+        .msg = view.msg,
+        .progress = view.progress,
+        .source = view.source,
+        .updated_at = view.updated_at,
+    });
+}
+
+/// Set a status inferred from the title or progress, unless a working or
+/// blocked status from a stronger source holds. Only a change is reported.
+fn inferStatus(
+    self: *Server,
+    pane: *Pane,
+    source: @FieldType(Status, "source"),
+    state: []const u8,
+    progress: ?u8,
+    msg: []const u8,
+) void {
+    if (pane.status) |s| {
+        if (@backingInt(s.source) < @backingInt(source) and
+            (std.mem.eql(u8, s.state, "working") or std.mem.eql(u8, s.state, "blocked"))) return;
+        if (s.source == source and std.mem.eql(u8, s.state, state) and s.progress == progress and
+            std.mem.eql(u8, pane.status_msg.items, msg)) return;
+    }
+    self.setStatus(pane, .{
+        .state = state,
+        .progress = progress,
+        .source = source,
+        .updated_at = self.wallMs(),
+    }, msg);
+}
+
+fn working(pane: *const Pane) bool {
+    const s = pane.status orelse return false;
+    return std.mem.eql(u8, s.state, "working");
+}
+
+/// OSC 9;4: a shown progress bar is working, and removing it after
+/// that is done.
+fn progressStatus(self: *Server, pane: *Pane, p: @FieldType(Block.Event, "progress_report")) void {
+    const state: []const u8 = switch (p.state) {
+        .set, .indeterminate => "working",
+        .@"error" => "error",
+        .pause => "idle",
+        .remove => if (working(pane)) "done" else return,
+    };
+    self.inferStatus(pane, .progress, state, if (p.state == .set) p.progress else null, "");
+}
+
+/// A title that starts with a braille spinner (Claude Code, and other
+/// programs animating one) is working, with the rest of the title as its
+/// message. The first other title after that is done.
+fn titleStatus(self: *Server, pane: *Pane, title: []const u8) void {
+    const t = splitTitle(title);
+    if (t.spinner) return self.inferStatus(pane, .title, "working", null, t.text);
+    if (working(pane)) self.inferStatus(pane, .title, "done", null, t.text);
+}
+
+/// A title without its leading symbol, such as Claude Code's "✳ " or a
+/// spinner frame, and whether that symbol is a braille spinner.
+fn splitTitle(title: []const u8) struct { spinner: bool, text: []const u8 } {
+    const len = std.unicode.utf8ByteSequenceLength(if (title.len > 0) title[0] else 0) catch 1;
+    const cp = if (len <= title.len) std.unicode.utf8Decode(title[0..len]) catch 0 else 0;
+    // Letters, digits and punctuation start ordinary titles.
+    if (cp < 0x2000) return .{ .spinner = false, .text = title };
+    return .{
+        .spinner = cp >= 0x2800 and cp <= 0x28FF,
+        .text = std.mem.trimStart(u8, title[len..], " "),
+    };
+}
+
+test "rex Server: titles with a leading symbol" {
+    const testing = std.testing;
+    const spin = splitTitle("⠂ Fixing the bug");
+    try testing.expect(spin.spinner);
+    try testing.expectEqualStrings("Fixing the bug", spin.text);
+    const idle = splitTitle("✳ Claude Code");
+    try testing.expect(!idle.spinner);
+    try testing.expectEqualStrings("Claude Code", idle.text);
+    const plain = splitTitle("nvim README.md");
+    try testing.expect(!plain.spinner);
+    try testing.expectEqualStrings("nvim README.md", plain.text);
+    try testing.expect(!splitTitle("").spinner);
 }
 
 // Data plane
@@ -979,6 +1174,7 @@ fn freePane(self: *Server, pane: *Pane) void {
     self.alloc.free(pane.label);
     pane.title.deinit(self.alloc);
     pane.pwd.deinit(self.alloc);
+    pane.status_msg.deinit(self.alloc);
     pane.waiters.deinit(self.alloc);
     pane.streams.deinit(self.alloc);
     if (pane.ring) |r| self.alloc.destroy(r);
@@ -1162,6 +1358,13 @@ const Request = struct {
     fn flag(self: *const Request, key: []const u8) ?bool {
         const v = self.get(key) orelse return null;
         return if (v == .bool) v.bool else null;
+    }
+
+    /// A positive integer, at most `max`.
+    fn count(self: *const Request, key: []const u8, default: usize, max: usize) usize {
+        const v = self.get(key) orelse return default;
+        if (v != .integer or v.integer < 1) return default;
+        return @min(@as(usize, @intCast(v.integer)), max);
     }
 
     fn size(self: *const Request, key: []const u8, default: u16) u16 {
@@ -1499,6 +1702,8 @@ fn writePane(pane: *Pane, w: *Stringify) Error!void {
         .cols = term.cols,
         .rows = term.rows,
         .exit_code = pane.exit_code,
+        .status = statusView(pane),
+        .last_activity = pane.last_activity,
     });
 }
 
@@ -1673,8 +1878,9 @@ fn sessionDescribeBlock(self: *Server, req: *Request, w: *Stringify) Error!void 
     try w.write(block_methods.keys());
     try w.objectField("events");
     try w.write([_][]const u8{
-        "bell",            "child_exited",           "clipboard_written", "desktop_notification",
-        "progress_report", "program_status_changed", "pwd_changed",       "title_changed",
+        "bell",            "child_exited",    "clipboard_written",      "desktop_notification",
+        "process_changed", "progress_report", "program_status_changed", "pwd_changed",
+        "title_changed",
     });
     try w.endObject();
 }
@@ -1747,6 +1953,7 @@ const BlockMethod = *const fn (*Pane, *Request, *Stringify) Error!void;
 
 const block_methods = std.StaticStringMap(BlockMethod).initComptime(.{
     .{ "format", &methodFormat },
+    .{ "list_dir", &methodListDir },
     .{ "process", &methodProcess },
     .{ "reset", &methodReset },
     .{ "size", &methodSize },
@@ -1784,8 +1991,54 @@ fn methodReset(pane: *Pane, _: *Request, w: *Stringify) Error!void {
     try w.write(.{});
 }
 
-fn methodProcess(pane: *Pane, _: *Request, w: *Stringify) Error!void {
-    try w.write(.{ .pid = pane.block.pid, .exit_code = pane.exit_code });
+/// The block's child, and the foreground process: the program the user
+/// is talking to.
+fn methodProcess(pane: *Pane, req: *Request, w: *Stringify) Error!void {
+    const fg = if (pane.exit_code == null) proc.foreground(pane.block.pty.master) else null;
+    try w.write(.{
+        .pid = pane.block.pid,
+        .exit_code = pane.exit_code,
+        .foreground = if (fg) |pid| try proc.describe(req.arena, pid) else null,
+    });
+}
+
+/// The entries under `path` (default "."), resolved as the foreground
+/// program would, to `depth` levels (default 1). With `query`, only the
+/// paths that fuzzily match it. At most `limit` entries (default 5000).
+fn methodListDir(pane: *Pane, req: *Request, w: *Stringify) Error!void {
+    const self = pane.server;
+    const root = try self.resolvePath(pane, req, req.str("path") orelse ".");
+    const query = req.str("query");
+    const r = listdir.list(req.arena, self.io, root, .{
+        .depth = @intCast(req.count("depth", 1, 32)),
+        .query = if (query != null and query.?.len > 0) query else null,
+        .limit = req.count("limit", listdir.default_limit, listdir.max_scanned),
+    }) catch |err| return req.fail(error.Fail, "listing {s} failed: {t}", .{ root, err });
+    try w.beginObject();
+    try w.objectField("path");
+    try w.write(root);
+    try w.objectField("entries");
+    try w.beginArray();
+    for (r.entries) |e| try w.write(.{ .name = e.name, .kind = @tagName(e.kind) });
+    try w.endArray();
+    try w.objectField("truncated");
+    try w.write(r.truncated);
+    try w.endObject();
+}
+
+/// An absolute path for `path` as the block's foreground program would
+/// resolve it: from its working directory, with `~` as the home directory.
+fn resolvePath(self: *Server, pane: *Pane, req: *Request, path: []const u8) Error![]const u8 {
+    if (std.mem.eql(u8, path, "~") or std.mem.startsWith(u8, path, "~/")) {
+        const home = pane.window.?.session.env.get("HOME") orelse self.env.get("HOME") orelse
+            return req.fail(error.Fail, "HOME is not set", .{});
+        return try std.fs.path.resolveAlloc(req.arena, &.{ home, path[@min(path.len, 2)..] });
+    }
+    var buf: [proc.max_path]u8 = undefined;
+    const fg = proc.foreground(pane.block.pty.master) orelse pane.block.pid;
+    const cwd = proc.cwd(fg, &buf) orelse proc.cwd(pane.block.pid, &buf) orelse
+        return req.fail(error.Fail, "the block's working directory is unknown", .{});
+    return try std.fs.path.resolveAlloc(req.arena, &.{ cwd, path });
 }
 
 fn methodSize(pane: *Pane, _: *Request, w: *Stringify) Error!void {
@@ -1926,4 +2179,112 @@ test "rex Server: sessions over the socket" {
     );
     defer alloc.free(stopped);
     try testing.expectError(error.Unreachable, protocol.connect(path));
+}
+
+test "rex Server: foreground process, list_dir, and program status" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const path = try std.fmt.allocPrintSentinel(alloc, "/tmp/rex-test-chrome-{d}.sock", .{c.getpid()}, 0);
+    defer alloc.free(path);
+    const lock_path = try std.fmt.allocPrintSentinel(alloc, "{s}.lock", .{path}, 0);
+    defer alloc.free(lock_path);
+    defer _ = c.unlink(lock_path);
+    defer _ = c.unlink(path);
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "a/b");
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/b/c.txt", .data = "" });
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = root_buf[0..try tmp.dir.realPath(io, &root_buf)];
+
+    var env: EnvMap = .init(alloc);
+    defer env.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+
+    const server = try Server.create(alloc, io, .{ .socket_path = path, .env = &env });
+    defer server.destroy();
+    const thread = try std.Thread.spawn(.{}, (struct {
+        fn run(srv: *Server) void {
+            srv.run() catch |err| std.debug.panic("server failed: {t}", .{err});
+        }
+    }).run, .{server});
+    defer thread.join();
+
+    const T = struct {
+        fn read(sock: posix.fd_t) ![]u8 {
+            var pfd = [_]posix.pollfd{.{ .fd = sock, .events = posix.POLL.IN, .revents = 0 }};
+            if (try posix.poll(&pfd, 10_000) == 0) return error.Timeout;
+            return (try protocol.readFrame(testing.allocator, sock)).payload;
+        }
+        fn call(sock: posix.fd_t, req: []const u8) ![]u8 {
+            try protocol.writeFrame(sock, .json, req);
+            return read(sock);
+        }
+        fn has(payload: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, payload, needle) != null;
+        }
+    };
+
+    const events = try protocol.connect(path);
+    defer _ = c.close(events);
+    alloc.free(try T.call(events,
+        \\{"id":1,"method":"session.subscribe"}
+    ));
+
+    const fd = try protocol.connect(path);
+    defer _ = c.close(fd);
+    // "aGkgdGhlcmU=" is "hi there" in base64.
+    const new = try std.fmt.allocPrint(alloc,
+        \\{{"id":2,"method":"session.create","params":{{"label":"chrome","cwd":"{s}","command":["/bin/sh","-c","printf '\\033]7501;state=working:msg=aGkgdGhlcmU=\\033\\\\'; exec sleep 30"]}}}}
+    , .{root});
+    defer alloc.free(new);
+    alloc.free(try T.call(fd, new));
+
+    // The status and the program the shell execs arrive as events.
+    var status = false;
+    var sleeping = false;
+    while (!status or !sleeping) {
+        const ev = try T.read(events);
+        defer alloc.free(ev);
+        if (T.has(ev, "\"event\":\"program_status_changed\"")) {
+            try testing.expect(T.has(ev, "\"state\":\"working\",\"kind\":null,\"msg\":\"hi there\""));
+            try testing.expect(T.has(ev, "\"source\":\"osc7501\",\"updated_at\":1"));
+            status = true;
+        }
+        if (T.has(ev, "\"event\":\"process_changed\"") and T.has(ev, "\"name\":\"sleep\"")) sleeping = true;
+    }
+
+    const process = try T.call(fd,
+        \\{"id":3,"method":"block.method","params":{"session":"chrome","method":"process"}}
+    );
+    defer alloc.free(process);
+    try testing.expect(T.has(process, "\"foreground\":{\"pid\":"));
+    try testing.expect(T.has(process, "\"name\":\"sleep\""));
+
+    const listed = try T.call(fd,
+        \\{"id":4,"method":"block.method","params":{"session":"chrome","method":"list_dir","depth":3}}
+    );
+    defer alloc.free(listed);
+    try testing.expect(T.has(listed, "{\"name\":\"a/b/c.txt\",\"kind\":\"file\"}"));
+    try testing.expect(T.has(listed, "\"truncated\":false"));
+    const missing = try T.call(fd,
+        \\{"id":5,"method":"block.method","params":{"session":"chrome","method":"list_dir","path":"nope"}}
+    );
+    defer alloc.free(missing);
+    try testing.expect(T.has(missing, "\"code\":\"fail\""));
+
+    const view = try T.call(fd,
+        \\{"id":6,"method":"session.view","params":{"session":"chrome"}}
+    );
+    defer alloc.free(view);
+    try testing.expect(T.has(view, "\"status\":{\"state\":\"working\""));
+    try testing.expect(T.has(view, "\"last_activity\":1"));
+
+    alloc.free(try T.call(fd,
+        \\{"id":7,"method":"server.stop"}
+    ));
 }

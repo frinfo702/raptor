@@ -29,6 +29,9 @@ pub const usage =
     \\  wait                   Wait for a block's program; exit with its status
     \\  session inspect [name] Describe a session
     \\  block inspect [block]  Describe a block
+    \\  block call <method> [key=value...]
+    \\                         Call a block method (process, list_dir, ...);
+    \\                         values that parse as JSON are sent as JSON
     \\
     \\Server:
     \\  server run [--idle-timeout secs]    Run the server in the foreground
@@ -197,7 +200,7 @@ const Ctx = struct {
             .events => self.events(),
             .wait => self.wait(),
             .session => self.inspect("session"),
-            .block => self.inspect("block"),
+            .block => if (words.len > 1 and std.mem.eql(u8, words[1], "call")) self.blockCall() else self.inspect("block"),
             .server => self.server(),
         };
     }
@@ -522,6 +525,31 @@ const Ctx = struct {
             .failed => |code| return code,
         };
         return exitStatus(int(r, "exit_code"));
+    }
+
+    fn blockCall(self: *Ctx) Error!ExitCode {
+        const words = self.args.words;
+        if (words.len < 3) return self.usageError("usage: rap block call <method> [key=value...]", .{});
+        var params = try std.json.ObjectMap.init(self.alloc, &.{}, &.{});
+        const t = self.target();
+        inline for (.{ "session", "window", "block" }) |f|
+            if (@field(t, f)) |v| try params.put(self.alloc, f, .{ .string = v });
+        try params.put(self.alloc, "method", .{ .string = words[2] });
+        for (words[3..]) |arg| {
+            const eq = std.mem.indexOfScalar(u8, arg, '=') orelse
+                return self.usageError("expected key=value, got '{s}'", .{arg});
+            const raw = arg[eq + 1 ..];
+            const v = std.json.parseFromSliceLeaky(std.json.Value, self.alloc, raw, .{}) catch
+                std.json.Value{ .string = raw };
+            try params.put(self.alloc, arg[0..eq], v);
+        }
+        if (try self.connect(false) == null) return .unreachable_server;
+        const r = switch (try self.call("block.method", std.json.Value{ .object = params })) {
+            .result => |v| v,
+            .failed => |code| return code,
+        };
+        try self.printJson(r);
+        return .ok;
     }
 
     fn inspect(self: *Ctx, comptime kind: []const u8) Error!ExitCode {

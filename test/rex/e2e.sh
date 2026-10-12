@@ -136,6 +136,37 @@ grep -q '"event":"block_created"' "$tmp/events" || fail "no block_created event"
 grep -q '"event":"title_changed".*"title":"hello"' "$tmp/events" || fail "no title_changed event"
 grep -q '"event":"child_exited"' "$tmp/events" || fail "no child_exited event"
 
+# Program status reports carry their message and a timestamp.
+"$RAP" events >"$tmp/events" &
+events=$!
+sleep 0.3
+# "aGkgdGhlcmU=" is "hi there" in base64.
+"$RAP" run -s demo -- /bin/sh -c "printf '\033]7501;state=done:msg=aGkgdGhlcmU=\033\\\\'; sleep 0.2" >/dev/null
+sleep 0.8
+kill $events 2>/dev/null || true
+wait $events 2>/dev/null || true
+grep -q '"event":"program_status_changed".*"state":"done".*"msg":"hi there".*"updated_at":[0-9]' "$tmp/events" ||
+  fail "no program_status_changed event with a message and time: $(grep program_status "$tmp/events")"
+
+# block call shows the foreground program and lists its directory.
+mkdir -p "$tmp/tree/a/b" "$tmp/tree/.git" "$tmp/tree/node_modules/x"
+touch "$tmp/tree/a/b/c.txt" "$tmp/tree/.git/HEAD" "$tmp/tree/node_modules/x/y.js"
+fg_block=$(cd "$tmp/tree" && "$RAP" run -s demo -- /bin/sh -c 'exec sleep 30')
+i=0
+until "$RAP" block call -b "$fg_block" process | grep -q '"foreground":{"pid":[0-9]*,"name":"sleep"'; do
+  i=$((i + 1))
+  [ $i -lt 100 ] || fail "block call process never showed sleep: $("$RAP" block call -b "$fg_block" process)"
+  sleep 0.05
+done
+"$RAP" block call -b "$fg_block" list_dir depth=3 >"$tmp/out"
+grep -q '{"name":"a/b/c.txt","kind":"file"}' "$tmp/out" || fail "list_dir missed a/b/c.txt: $(cat "$tmp/out")"
+grep -q '"name":".git/HEAD"' "$tmp/out" && fail "list_dir descended into .git"
+"$RAP" block call -b "$fg_block" list_dir path=a query=C.TXT depth=4 | grep -q '"entries":\[{"name":"b/c.txt"' ||
+  fail "list_dir query"
+expect_status 1 "$RAP" block call -b "$fg_block" list_dir path=nope
+expect_status 2 "$RAP" block call -b "$fg_block" list_dir oops
+"$RAP" close -b "$fg_block"
+
 # Stopping removes the socket, and without autostart nothing answers.
 "$RAP" server stop
 [ ! -e "$RAP_SERVER" ] || fail "socket still exists after server stop"
