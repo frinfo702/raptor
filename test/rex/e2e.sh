@@ -106,6 +106,10 @@ expect_status 3 "$RAP" close -s demo -b 2
 "$RAP" close -b "$block"
 "$RAP" --json session inspect demo | grep -q '"type":"vertical"' && fail "closed block still in layout"
 
+# Memory stats list every block, in text and as JSON.
+"$RAP" server stats | grep -q '^BLOCK ' || fail "server stats"
+"$RAP" --json server stats | grep -q '"rows":[0-9]*,"primary":{"pages":{"pages":' || fail "server stats --json"
+
 # Keys reach the program.
 "$RAP" send-key -s demo e c h o Space k e y s Enter
 wait_capture demo keys

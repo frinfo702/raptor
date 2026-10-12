@@ -34,6 +34,7 @@ pub const usage =
     \\  server run [--idle-timeout secs]    Run the server in the foreground
     \\  server start [--idle-timeout secs]  Start the server in the background
     \\  server stop | server status
+    \\  server stats [--json]               Print memory use per block
     \\
     \\Other:
     \\  version                Print the build id
@@ -643,9 +644,54 @@ const Ctx = struct {
             });
             return .ok;
         }
-        return self.usageError("usage: rap server run|start|stop|status", .{});
+        if (std.mem.eql(u8, sub, "stats")) {
+            if (try self.connect(false) == null) return .unreachable_server;
+            const r = switch (try self.call("server.stats", .{})) {
+                .result => |v| v,
+                .failed => |code| return code,
+            };
+            if (self.args.json) {
+                try self.printJson(r);
+                return .ok;
+            }
+            const fp = r.object.get("phys_footprint").?;
+            if (fp == .integer) try self.out.print("phys_footprint: {d:.1} KiB\n", .{kib(fp.integer)});
+            try self.out.print("{s:<12} {s:<16} {s:>8} {s:>6} {s:>10} {s:>13} {s:>15}\n", .{
+                "BLOCK", "SESSION", "ROWS", "PAGES", "COMPRESSED", "RESIDENT KiB", "COMPRESSED KiB",
+            });
+            for (r.object.get("blocks").?.array.items) |b| {
+                // Both screens together; images count as resident.
+                var pages: i64 = 0;
+                var compressed: i64 = 0;
+                var resident: i64 = 0;
+                var encoded: i64 = 0;
+                for ([_][]const u8{ "primary", "alternate" }) |key| {
+                    const screen = b.object.get(key) orelse continue;
+                    if (screen != .object) continue;
+                    const p = screen.object.get("pages").?;
+                    pages += int(p, "pages");
+                    compressed += int(p, "compressed_pages");
+                    resident += int(p, "resident_bytes") + int(screen, "image_bytes");
+                    encoded += int(p, "compressed_bytes");
+                }
+                const id = str(b, "id");
+                try self.out.print("{s:<12} {s:<16} {d:>8} {d:>6} {d:>10} {d:>13.1} {d:>15.1}\n", .{
+                    id[id.len - 12 ..],   str(b, "session"),
+                    // Unsigned: Zig prints a "+" on signed ints formatted with a width.
+                    @abs(int(b, "rows")), @abs(pages),
+                    @abs(compressed),     kib(resident),
+                    kib(encoded),
+                });
+            }
+            return .ok;
+        }
+        return self.usageError("usage: rap server run|start|stop|status|stats", .{});
     }
 };
+
+fn kib(bytes: i64) f64 {
+    return @as(f64, @floatFromInt(bytes)) / 1024;
+}
 
 fn exitStatus(code: i64) ExitCode {
     return @fromBackingInt(@intCast(std.math.cast(u8, code) orelse 1));
