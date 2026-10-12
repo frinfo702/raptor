@@ -118,6 +118,16 @@ pub fn isLight(bg: RGB) bool {
     return ratio(0, y) > ratio(1, y);
 }
 
+/// `fg` drawn over `bg` at `alpha`, as faint text is.
+pub fn blend(fg: RGB, bg: RGB, alpha: u8) RGB {
+    const a: u16 = alpha;
+    return .{
+        .r = @intCast((@as(u16, fg.r) * a + @as(u16, bg.r) * (255 - a) + 127) / 255),
+        .g = @intCast((@as(u16, fg.g) * a + @as(u16, bg.g) * (255 - a) + 127) / 255),
+        .b = @intCast((@as(u16, fg.b) * a + @as(u16, bg.b) * (255 - a) + 127) / 255),
+    };
+}
+
 /// WCAG contrast ratio between two colours.
 pub fn contrast(a: RGB, b: RGB) f32 {
     return ratio(luminance(a), luminance(b));
@@ -263,9 +273,7 @@ test "rex acc: off-pairs reach the target, keep hue, minimal change" {
         const lighter = !isLight(p[1]);
         try testing.expectEqual(lighter, luminance(out) > luminance(p[0]));
 
-        // Chromatic text keeps its hue. Near-white on the lazygit bar
-        // has no chroma left in sRGB, so hue is only checked where the
-        // output still shows one.
+        // Hue is undefined at near-zero chroma, so the check applies when the output chroma is at least 0.02.
         const in = Lch.from(p[0]);
         const o = Lch.from(out);
         if (in.c >= 0.04 and o.c >= 0.02) {
@@ -284,6 +292,15 @@ test "rex acc: idempotent" {
         try testing.expectEqual(once, acc.get(once, p[1]));
         try testing.expectEqual(once, acc.get(p[0], p[1]));
     }
+}
+
+test "rex acc: faint text reaches the target after blending" {
+    var acc = testAcc();
+    const fg = hex(0x6F9C8F);
+    const blended = blend(fg, light_bg, 128);
+    try testing.expect(contrast(blended, light_bg) < target);
+    const out = acc.get(blended, light_bg);
+    try testing.expect(contrast(out, light_bg) >= target);
 }
 
 test "rex acc: lightens on a dark bg" {

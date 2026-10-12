@@ -1092,6 +1092,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             };
         }
 
+        /// The corrected color for text drawn on `bg`, pre-blended when
+        /// faint so it can be drawn opaque.
+        fn accText(self: *Self, color: terminal.color.RGB, bg: terminal.color.RGB, faint: bool) terminal.color.RGB {
+            const c = if (faint) rex_acc.blend(color, bg, self.config.faint_opacity) else color;
+            return self.acc.get(c, bg);
+        }
+
         /// Mark the full screen as dirty so that we redraw everything.
         pub inline fn markDirty(self: *Self) void {
             self.terminal_state.dirty = .full;
@@ -3192,13 +3199,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Text glyphs get contrast correction against the cell's
                 // own background; graphics glyphs keep their colors.
-                const glyph_fg = if (self.acc_enabled and !noMinContrast(cell.codepoint()))
-                    self.acc.get(fg, bg orelse state.colors.background)
-                else
-                    fg;
+                // Faint text is blended before correcting and then drawn
+                // opaque, so the dimmed result still meets the target.
+                const acc_on = self.acc_enabled and !noMinContrast(cell.codepoint());
+                const cell_bg = bg orelse state.colors.background;
+                const glyph_fg = if (acc_on) self.accText(fg, cell_bg, style.flags.faint) else fg;
 
                 // Foreground alpha for this cell.
-                const alpha: u8 = if (style.flags.faint) self.config.faint_opacity else 255;
+                const alpha: u8 = if (style.flags.faint and !acc_on) self.config.faint_opacity else 255;
 
                 // Set the cell's background color.
                 {
@@ -3273,7 +3281,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     @intCast(x),
                     @intCast(y),
                     underline,
-                    style.underlineColor(&state.colors.palette) orelse fg,
+                    if (style.underlineColor(&state.colors.palette)) |c|
+                        (if (acc_on) self.accText(c, cell_bg, style.flags.faint) else c)
+                    else
+                        glyph_fg,
                     alpha,
                 ) catch |err| {
                     log.warn(
@@ -3282,7 +3293,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     );
                 };
 
-                if (style.flags.overline) self.addOverline(@intCast(x), @intCast(y), fg, alpha) catch |err| {
+                if (style.flags.overline) self.addOverline(@intCast(x), @intCast(y), glyph_fg, alpha) catch |err| {
                     log.warn(
                         "error adding overline to cell, will be invalid x={} y={}, err={}",
                         .{ x, y, err },
@@ -3367,7 +3378,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (style.flags.strikethrough) self.addStrikethrough(
                     @intCast(x),
                     @intCast(y),
-                    fg,
+                    glyph_fg,
                     alpha,
                 ) catch |err| {
                     log.warn(
