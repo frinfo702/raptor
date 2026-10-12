@@ -35,5 +35,6 @@ snippet markers in sync with the headers in `include/ghostty/vt/`.
 ## Conventions
 
 - Executable names use underscores: `c_vt_encode_focus` (not hyphens).
-- All C examples link `ghostty-vt` via `lazyDependency("ghostty", ...)`.
+- C examples link `ghostty-vt` via `lazyDependency("ghostty", ...)`, except
+  `c-rap-client`, which links the full libghostty.
 - `build.zig` files follow a common template — keep them consistent.
