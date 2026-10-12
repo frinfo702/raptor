@@ -53,8 +53,8 @@ on_event: ?EventFn = null,
 event_userdata: ?*anyopaque = null,
 
 /// Held by the reader while it feeds a bound terminal, so that unbinding
-/// can wait until the terminal is no longer fed. A terminal never waits
-/// for the app while fed, so the app's thread may wait for this.
+/// can wait until the terminal is no longer fed. A fed terminal may wait
+/// for the app, so the app's thread detaches it before it waits for this.
 feed_lock: std.Io.Mutex = .init,
 
 const Pending = struct {
@@ -93,6 +93,7 @@ pub fn connect(alloc: Allocator, io: std.Io, path: []const u8, launch: ?Launch) 
 pub fn deinit(self: *Client) void {
     self.lock.lockUncancelable(self.io);
     self.closing = true;
+    for (self.bindings.items) |b| if (b.sink) |s| s.detach(true);
     // Wake the reader.
     if (self.fd >= 0) _ = c.shutdown(self.fd, c.SHUT.RDWR);
     self.lock.unlock(self.io);
@@ -293,6 +294,7 @@ pub fn bind(self: *Client, b: *Binding, block: []const u8, sink: Feed.Sink) !voi
     b.feed.deinit(self.alloc);
     b.feed = .{};
     b.resynced = false;
+    sink.detach(false);
 
     self.lock.lockUncancelable(self.io);
     defer self.lock.unlock(self.io);
@@ -315,6 +317,7 @@ pub fn unbind(self: *Client, b: *Binding) void {
         self.lock.lockUncancelable(self.io);
         defer self.lock.unlock(self.io);
         if (b.stream) |s| _ = self.sendLocked("block.unsubscribe", .{ .stream = s }) catch {};
+        if (b.sink) |s| s.detach(true);
         b.stream = null;
         b.sub_id = null;
         b.sink = null;

@@ -326,7 +326,6 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .enquiry_response = opts.config.enquiry_response,
         .xt_checksum_report = opts.config.xt_checksum_report,
         .suppress_replies = opts.backend == .external,
-        .never_wait_on_surface = opts.backend == .external,
     };
 
     const thread_enter_state = if (opts.backend == .external)

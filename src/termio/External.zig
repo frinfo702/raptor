@@ -7,7 +7,8 @@
 //! The remote side answers the program's queries, so the stream handler
 //! drops this terminal's own replies, and the terminal only resizes when
 //! the remote side says it did (`setGrid`). Whoever feeds it may be a
-//! thread the app waits on, so it never waits for the app's mailbox.
+//! thread the app waits on, so the app detaches it (`Feed.Sink.detach`)
+//! before it waits, which ends any wait for room in the app's mailbox.
 //!
 //! The callbacks run on the termio thread.
 const External = @This();
@@ -21,6 +22,7 @@ const termio = @import("../termio.zig");
 const restore = @import("../rex/restore.zig");
 const Feed = @import("../rex/Feed.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
+const App = @import("../App.zig");
 
 const log = std.log.scoped(.io_external);
 
@@ -208,12 +210,17 @@ const sink_vtable: Feed.Sink.VTable = .{
         fn f(ctx: *anyopaque, code: u32) void {
             // As termio.Exec reports a local child's exit. The remote side
             // knows how long the program ran; never treat the exit as an
-            // abnormal, too-quick one. Never wait for the app, which may be
-            // waiting on the caller to unbind.
-            if (sinkTermio(ctx).surface_mailbox.push(.{ .child_exited = .{
+            // abnormal, too-quick one.
+            const io = sinkTermio(ctx);
+            if (!io.terminal_stream.handler.pushSurface(.{ .child_exited = .{
                 .exit_code = code,
                 .runtime_ms = std.math.maxInt(u64),
-            } }, .{ .instant = {} }) == 0) log.warn("app mailbox full, dropping child exit", .{});
+            } })) log.info("detached, dropping child exit", .{});
+        }
+    }.f,
+    .detach = struct {
+        fn f(ctx: *anyopaque, on: bool) void {
+            sinkTermio(ctx).terminal_stream.handler.detaching.store(on, .release);
         }
     }.f,
 };
@@ -234,6 +241,8 @@ pub const TestSurface = struct {
     renderer_state: renderer.State,
     renderer_wakeup: xev.Async,
     renderer_mailbox: *renderer.Thread.Mailbox,
+    /// The app's mailbox, which nothing drains but the test.
+    app_mailbox: *App.Mailbox.Queue,
     io: termio.Termio,
     thread: termio.Thread,
     thr: std.Thread,
@@ -266,6 +275,7 @@ pub const TestSurface = struct {
             .renderer_state = undefined,
             .renderer_wakeup = try .init(),
             .renderer_mailbox = try .create(alloc),
+            .app_mailbox = try .create(alloc),
             .io = undefined,
             .thread = try .init(alloc),
             .thr = undefined,
@@ -280,8 +290,9 @@ pub const TestSurface = struct {
             .renderer_state = &self.renderer_state,
             .renderer_wakeup = self.renderer_wakeup,
             .renderer_mailbox = self.renderer_mailbox,
-            // Nothing these tests do messages the surface.
-            .surface_mailbox = undefined,
+            // Only a runtime with no app loop to wake takes an undefined
+            // app.
+            .surface_mailbox = .{ .surface = undefined, .app = .{ .rt_app = undefined, .mailbox = self.app_mailbox } },
         });
         self.thr = try .spawn(.{}, termio.Thread.threadMain, .{ &self.thread, &self.io });
     }
@@ -293,6 +304,7 @@ pub const TestSurface = struct {
         self.thread.deinit();
         self.io.deinit();
         self.renderer_mailbox.destroy(alloc);
+        self.app_mailbox.destroy(alloc);
         self.renderer_wakeup.deinit();
         self.config.deinit();
         self.written.deinit(alloc);

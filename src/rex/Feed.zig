@@ -32,6 +32,9 @@ pub const Sink = struct {
         grid: *const fn (*anyopaque, u16, u16) anyerror!void,
         /// The block's program exited with this code.
         exited: *const fn (*anyopaque, u32) void,
+        /// Stop (true) or resume (false) waiting for whoever takes the
+        /// terminal's messages, for a terminal that waits on the app.
+        detach: ?*const fn (*anyopaque, bool) void = null,
     };
 
     pub fn load(self: Sink, bytes: []const u8) anyerror!void {
@@ -48,6 +51,10 @@ pub const Sink = struct {
 
     pub fn exited(self: Sink, code: u32) void {
         self.vtable.exited(self.ctx, code);
+    }
+
+    pub fn detach(self: Sink, on: bool) void {
+        if (self.vtable.detach) |f| f(self.ctx, on);
     }
 };
 

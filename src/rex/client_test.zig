@@ -299,6 +299,61 @@ test "rex client: binds an external-I/O surface" {
     } else return error.Timeout;
 }
 
+test "rex client: an external surface gets the exit after a full app mailbox" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const apprt = @import("../apprt.zig");
+    // The test surface's app has no loop to wake.
+    if (comptime apprt.runtime != apprt.none) return error.SkipZigTest;
+    const External = @import("../termio.zig").External;
+    var h: Harness = undefined;
+    try h.start();
+    defer h.stop();
+    const client = try Client.connect(alloc, testing.io, h.path, null);
+    defer client.deinit();
+    (try call(client, .{ .method = "session.subscribe", .params = .{} })).deinit();
+
+    const block = block: {
+        const r = try call(client, .{ .method = "session.create", .params = .{
+            .cols = 80,
+            .rows = 24,
+            .command = [_][]const u8{ "/bin/sh", "-c", "read x; i=0; while [ $i -lt 200 ]; do printf '\\a'; i=$((i+1)); done; exit 3" },
+        } });
+        defer r.deinit();
+        break :block try alloc.dupe(u8, result(r).object.get("block").?.string);
+    };
+    defer alloc.free(block);
+
+    const b = try client.newBinding();
+    var s: External.TestSurface = undefined;
+    try s.initWith(.{ .userdata = b, .write_cb = Client.Binding.onWrite });
+    defer s.deinit();
+    try client.bind(b, block, External.sink(&s.io));
+    defer client.unbind(b);
+
+    // The bells fill the app's mailbox before the app looks at it, and
+    // the exit follows them.
+    try s.write("go\n");
+    for (0..1000) |_| {
+        if (s.app_mailbox.len == 64) break;
+        try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
+    } else return error.Timeout;
+    try std.Io.sleep(testing.io, .fromMilliseconds(200), .awake);
+
+    var bells: usize = 0;
+    for (0..1000) |_| {
+        while (s.app_mailbox.pop(testing.io)) |msg| switch (msg.surface_message.message) {
+            .ring_bell => bells += 1,
+            .child_exited => |e| {
+                try testing.expectEqual(200, bells);
+                return testing.expectEqual(3, e.exit_code);
+            },
+            else => {},
+        };
+        try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
+    }
+    return error.Timeout;
+}
+
 test "rex client: gives up on a block whose snapshot never loads" {
     if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
     var h: Harness = undefined;
