@@ -623,14 +623,15 @@ test "rex Block: title, output, DA reply, and exit" {
     var read_buf: ReadBuffer = undefined;
 
     const block = try Block.create(alloc, &loop, &read_buf, .{
-        .args = &.{ "/bin/sh", "-c", "printf '\\033]0;hello\\007'; echo hi; read -r x; echo \"got:$x\"" },
+        .args = &.{ "/bin/sh", "-c", "printf '\\033]0;hello\\007'; echo hi; read -r x; echo \"got:$x\" | tr '\\033' E" },
         .on_event = &Recorder.onEvent,
         .userdata = &rec,
     });
     defer block.destroy();
 
     // The DA query makes the terminal reply to the child, which reads the
-    // reply as its line once the newline follows.
+    // reply as its line once the newline follows. The child prints the
+    // reply's ESC as E so its output isn't parsed back as a DA response.
     block.processOutput("\x1b[c");
     try block.write("\n");
 
@@ -656,7 +657,7 @@ test "rex Block: title, output, DA reply, and exit" {
 
     try testing.expectEqualStrings("hello", rec.title.?);
     try testing.expectEqual(@as(?u32, 0), rec.exit_code);
-    try testing.expect(std.mem.indexOf(u8, rec.output.items, "got:\x1b[?") != null);
+    try testing.expect(std.mem.indexOf(u8, rec.output.items, "got:E[?") != null);
 
     const plain = try block.term.plainString(alloc);
     defer alloc.free(plain);
