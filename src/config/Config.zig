@@ -795,8 +795,9 @@ foreground: Color = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
 ///   * `on` - Always on.
 ///   * `off` - Always off.
 ///
-/// Box drawing, block elements and Powerline glyphs keep their colors. The
-/// `toggle_contrast_correction` action flips it at runtime.
+/// Box drawing, block elements, Powerline and Braille (graph) glyphs keep their
+/// colors. Faint text and underline, overline and strikethrough lines are
+/// corrected too. The `toggle_contrast_correction` action flips it at runtime.
 @"contrast-correction": ContrastCorrection = .auto,
 
 /// Color palette for the 256 color form that many terminal applications use.
