@@ -387,6 +387,63 @@ pub fn snapshot(self: *const Block, alloc: Allocator, w: *std.Io.Writer) Snapsho
     try terminal.snapshot.encode(alloc, w, &self.term, .{ .continuation = .{ .bytes = cont.written() } });
 }
 
+/// What the terminal's pages hold, on every screen.
+pub const MemoryUsage = struct {
+    /// Rows of scrollback and screen on the primary screen.
+    rows: usize = 0,
+    pages: usize = 0,
+    compressed_pages: usize = 0,
+    /// Raw page memory not compressed. The OS backs only the parts of a
+    /// page that were written, so this is an upper bound.
+    resident_bytes: usize = 0,
+    /// The encoded copies of compressed pages.
+    compressed_bytes: usize = 0,
+};
+
+pub fn memoryUsage(self: *const Block) MemoryUsage {
+    var u: MemoryUsage = .{ .rows = self.term.screens.get(.primary).?.pages.total_rows };
+    for ([_]terminal.ScreenSet.Key{ .primary, .alternate }) |key| {
+        const screen = self.term.screens.get(key) orelse continue;
+        var it = screen.pages.pages.first;
+        while (it) |node| : (it = node.next) {
+            u.pages += 1;
+            switch (node.data) {
+                .resident => |p| u.resident_bytes += p.memory.len,
+                .compressed => |p| {
+                    u.compressed_pages += 1;
+                    u.compressed_bytes += p.encoded.len;
+                },
+            }
+        }
+    }
+    return u;
+}
+
+/// Keep the terminal's resident pages out of every child forked from now
+/// on. Call it on every block before starting another one.
+///
+/// On macOS, a page written to after a fork lives on top of a shadow of
+/// its old contents, and madvise can't release such a page. Compressing it
+/// later would then keep both the raw page and its encoded copy. Children
+/// never touch terminal pages before they exec, so they don't need them.
+pub fn hidePagesFromChildren(self: *const Block) void {
+    // Test pages come from the testing allocator and may share their OS
+    // pages with memory a child does touch.
+    if (comptime builtin.is_test or !builtin.os.tag.isDarwin()) return;
+    for ([_]terminal.ScreenSet.Key{ .primary, .alternate }) |key| {
+        const screen = self.term.screens.get(key) orelse continue;
+        var it = screen.pages.pages.first;
+        while (it) |node| : (it = node.next) switch (node.data) {
+            .resident => |p| _ = minherit(p.memory.ptr, p.memory.len, vm_inherit_none),
+            // Released pages have nothing a fork could shadow.
+            .compressed => {},
+        };
+    }
+}
+
+const vm_inherit_none = 2;
+extern "c" fn minherit(addr: *anyopaque, len: usize, inherit: c_int) c_int;
+
 fn emit(self: *Block, event: Event) void {
     self.on_event(self, event);
 }

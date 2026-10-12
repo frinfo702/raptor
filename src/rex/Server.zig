@@ -35,8 +35,14 @@ const protocol = @import("protocol.zig");
 
 const log = std.log.scoped(.rex_server);
 
-/// How often the server checks for idleness and signals.
+/// How often the server checks for idleness and signals. Blocks also
+/// compress their scrollback once they have been quiet for a whole tick,
+/// the renderer's idle interval.
 const tick_ms = 250;
+
+/// The pause between bounded compression steps, as in the renderer, so
+/// clients and ptys are served while blocks compress.
+const compress_step_ms = 1;
 
 /// Set from a signal handler to make the server exit.
 pub var signaled: std.atomic.Value(bool) = .init(false);
@@ -104,6 +110,12 @@ const Pane = struct {
     /// The seq of the latest resize. Output from before it can't be
     /// replayed, since replay carries no grid markers.
     grid_seq: ?u64 = null,
+    /// The terminal's compression activity at the last tick, and when its
+    /// last compression pass finished.
+    activity: ?u64 = null,
+    compressed: ?u64 = null,
+    /// In the server's `compress_queue`.
+    queued: bool = false,
 };
 
 /// One client's subscription to one block.
@@ -160,6 +172,11 @@ listen_fd: posix.fd_t,
 listen_c: xev.Completion = .{},
 timer: xev.Timer,
 timer_c: xev.Completion = .{},
+compress_timer: xev.Timer,
+compress_c: xev.Completion = .{},
+compress_armed: bool = false,
+/// Quiet blocks that may have scrollback left to compress.
+compress_queue: std.ArrayList(*Pane) = .empty,
 env: EnvMap,
 idle_timeout_ms: u64,
 idle_since: ?i64 = null,
@@ -246,6 +263,7 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
         .lock_fd = lock_fd,
         .listen_fd = fd,
         .timer = try .init(),
+        .compress_timer = try .init(),
         .env = env,
         .idle_timeout_ms = opts.idle_timeout_ms,
         .started_ms = undefined,
@@ -287,10 +305,12 @@ pub fn destroy(self: *Server) void {
     self.reap.deinit(self.alloc);
     self.dying.deinit(self.alloc);
     self.sessions.deinit(self.alloc);
+    self.compress_queue.deinit(self.alloc);
     self.unlinkSocket();
     _ = c.close(self.listen_fd);
     _ = c.close(self.lock_fd);
     self.timer.deinit();
+    self.compress_timer.deinit();
     self.loop.deinit();
     self.env.deinit();
     self.alloc.destroy(self.read_buf);
@@ -329,9 +349,67 @@ fn onTick(
             self.stopping = true;
         }
     } else self.idle_since = null;
+    for (self.sessions.items) |s| for (s.windows.items) |w| self.queueQuiet(w.tree.root);
+    self.armCompress();
     // The tick also bounds how long a loop iteration can wait while
     // shutting down.
     self.timer.run(loop, comp, tick_ms, Server, self, onTick);
+    return .disarm;
+}
+
+/// Queue the blocks whose terminal had no compression activity since the
+/// last tick and has not been compressed since its last activity.
+fn queueQuiet(self: *Server, node: *Tree.Node) void {
+    switch (node.*) {
+        .leaf => |pane| {
+            const activity = pane.block.term.compressionActivity();
+            if (pane.activity != activity) {
+                pane.activity = activity;
+                return;
+            }
+            if (pane.queued or pane.compressed == activity) return;
+            self.compress_queue.append(self.alloc, pane) catch return;
+            pane.queued = true;
+        },
+        .split => |s| {
+            self.queueQuiet(s.a);
+            self.queueQuiet(s.b);
+        },
+    }
+}
+
+fn armCompress(self: *Server) void {
+    if (self.compress_armed or self.compress_queue.items.len == 0) return;
+    self.compress_armed = true;
+    self.compress_timer.run(&self.loop, &self.compress_c, compress_step_ms, Server, self, onCompress);
+}
+
+/// One bounded compression step of the first queued block. A block that
+/// became active again leaves the queue until it is quiet for a tick.
+fn onCompress(
+    self_: ?*Server,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    const self = self_.?;
+    self.compress_armed = false;
+    _ = r catch return .disarm;
+    if (self.compress_queue.items.len == 0) return .disarm;
+    const pane = self.compress_queue.items[0];
+    const term = &pane.block.term;
+    const done = if (term.compressionActivity() != pane.activity) true else switch (term.compress(.incremental)) {
+        .pending => false,
+        .complete, .unsupported => done: {
+            pane.compressed = pane.activity;
+            break :done true;
+        },
+    };
+    if (done) {
+        _ = self.compress_queue.orderedRemove(0);
+        pane.queued = false;
+    }
+    self.armCompress();
     return .disarm;
 }
 
@@ -762,9 +840,12 @@ fn replay(self: *Server, st: *Stream, since: u64) void {
 
 fn sendSnapshot(self: *Server, st: *Stream) void {
     const cl = st.client;
-    var buf: std.Io.Writer.Allocating = .init(self.alloc);
-    defer buf.deinit();
-    st.pane.block.snapshot(self.alloc, &buf.writer) catch |err| switch (err) {
+    // Encoding decodes compressed pages into big temporary buffers. Freed
+    // to malloc, they would stay in the server's footprint.
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    var buf: std.Io.Writer.Allocating = .init(arena.allocator());
+    st.pane.block.snapshot(arena.allocator(), &buf.writer) catch |err| switch (err) {
         // Retried after the block's next output.
         error.ContinuationUnavailable => return,
         else => {
@@ -927,6 +1008,8 @@ fn spawnPane(self: *Server, s: *Session, req: *Request) Error!*Pane {
     const cwd = if (req.str("cwd")) |p| try req.arena.dupeSentinel(u8, p, 0) else s.cwd orelse
         if (self.env.get("HOME")) |h| try req.arena.dupeSentinel(u8, h, 0) else null;
 
+    // Starting the block forks the server.
+    for (self.sessions.items) |other| for (try sessionPanes(other, req.arena)) |p| p.block.hidePagesFromChildren();
     if (!Block.kqueue) pane.own_buf = try self.alloc.create(Block.ReadBuffer);
     errdefer if (pane.own_buf) |b| self.alloc.destroy(b);
     pane.block = Block.create(self.alloc, &self.loop, pane.own_buf orelse self.read_buf, .{
@@ -992,6 +1075,7 @@ fn closePane(self: *Server, pane: *Pane) void {
 fn retirePane(self: *Server, pane: *Pane) void {
     const w = pane.window.?;
     pane.window = null;
+    if (pane.queued) removePtr(Pane, &self.compress_queue, pane);
     while (pane.streams.items.len > 0) self.removeStream(pane.streams.items[pane.streams.items.len - 1]);
     self.emit("block_closed", &w.session.id, .{
         .block = prefixed("block", &pane.id),
@@ -1104,6 +1188,7 @@ const Handler = *const fn (*Server, *Request, *Stringify) Error!void;
 const methods = std.StaticStringMap(Handler).initComptime(.{
     .{ "server.version", &serverVersion },
     .{ "server.status", &serverStatus },
+    .{ "server.stats", &serverStats },
     .{ "server.stop", &serverStop },
     .{ "session.list", &sessionList },
     .{ "session.create", &sessionCreate },
@@ -1267,6 +1352,33 @@ fn serverStatus(self: *Server, _: *Request, w: *Stringify) Error!void {
         .clients = self.clients.items.len,
         .uptime_ms = self.nowMs() - self.started_ms,
     });
+}
+
+/// Memory use: the server's phys_footprint where the OS reports it, the
+/// figure Activity Monitor shows, and each block's terminal pages.
+fn serverStats(self: *Server, req: *Request, w: *Stringify) Error!void {
+    try w.beginObject();
+    try w.objectField("pid");
+    try w.write(c.getpid());
+    try w.objectField("phys_footprint");
+    try w.write(physFootprint());
+    try w.objectField("blocks");
+    try w.beginArray();
+    for (self.sessions.items) |s| for (try sessionPanes(s, req.arena)) |pane| try w.write(.{
+        .id = prefixed("block", &pane.id),
+        .session = s.label,
+        .memory_usage = pane.block.memoryUsage(),
+    });
+    try w.endArray();
+    try w.endObject();
+}
+
+fn physFootprint() ?u64 {
+    if (comptime !builtin.os.tag.isDarwin()) return null;
+    var info: c.task_vm_info_data_t = undefined;
+    var n: c.mach_msg_type_number_t = c.TASK.VM.INFO_COUNT;
+    if (c.task_info(c.mach_task_self(), c.TASK.VM.INFO, @ptrCast(&info), &n) != 0) return null;
+    return info.phys_footprint;
 }
 
 fn serverStop(self: *Server, _: *Request, w: *Stringify) Error!void {
@@ -1642,6 +1754,9 @@ fn methodFormat(pane: *Pane, req: *Request, w: *Stringify) Error!void {
     const screen = pane.block.term.screens.active;
     const text = screen.dumpStringAlloc(req.arena, if (all) .{ .screen = .{} } else .{ .viewport = .{} }) catch |err|
         return req.fail(error.Fail, "formatting failed: {t}", .{err});
+    // Reading scrollback restores compressed pages without counting as
+    // activity, so compress them again once the block is quiet.
+    if (all) pane.compressed = null;
     try w.write(.{ .text = text, .seq = pane.block.seq });
 }
 
@@ -1770,6 +1885,25 @@ test "rex Server: sessions over the socket" {
     );
     defer alloc.free(list);
     try testing.expectEqualStrings("{\"id\":7,\"result\":{\"sessions\":[]}}", list);
+
+    // Scrollback of a quiet block is compressed, and the stats show it.
+    const big = try T.call(fd,
+        \\{"id":9,"method":"session.create","params":{"label":"big","command":["/bin/sh","-c","yes line | head -n 2000; sleep 30"]}}
+    );
+    defer alloc.free(big);
+    tries = 0;
+    while (true) : (tries += 1) {
+        const stats = try T.call(fd,
+            \\{"id":10,"method":"server.stats"}
+        );
+        defer alloc.free(stats);
+        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, stats, .{});
+        defer parsed.deinit();
+        const usage = parsed.value.object.get("result").?.object.get("blocks").?.array.items[0].object.get("memory_usage").?;
+        if (usage.object.get("compressed_pages").?.integer > 0) break;
+        if (tries == 1000) return error.TestUnexpectedResult;
+        try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
+    }
 
     const stopped = try T.call(fd,
         \\{"id":8,"method":"server.stop"}
