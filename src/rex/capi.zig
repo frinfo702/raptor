@@ -28,10 +28,7 @@ fn connect(socket_path: ?[*:0]const u8) !*Client {
     var env = try global.environMap();
     defer env.deinit();
     const path = try protocol.resolveSocketPath(arena.allocator(), io, &env, null);
-    // The app bundle keeps `rap` beside the app's executable.
-    const dir = try std.process.executableDirPathAlloc(io, arena.allocator());
-    const exe = try std.fs.path.join(arena.allocator(), &.{ dir, "rap" });
-    return Client.connect(alloc, io, path, .{ .exe = exe, .env = &env });
+    return Client.connect(alloc, io, path, null);
 }
 
 export fn rap_client_free(client: *Client) void {

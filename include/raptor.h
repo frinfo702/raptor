@@ -35,9 +35,8 @@ typedef struct rap_mirror_s* rap_mirror_t;
 typedef void (*rap_event_cb)(void* userdata, const char* json);
 
 // Connect to the server listening on socket_path. If socket_path is NULL,
-// use $RAP_SERVER or the per-user default socket, and if no server is
-// running there, start the `rap` executable next to this program's
-// (unless RAP_AUTOSTART=0). Returns NULL if there is no server.
+// use $RAP_SERVER or the per-user default socket. Never starts a server.
+// Returns NULL if there is no server.
 GHOSTTY_API rap_client_t rap_client_connect(const char* socket_path);
 
 // Disconnect. Free surfaces bound to the client first.
