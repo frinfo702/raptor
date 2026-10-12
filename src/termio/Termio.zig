@@ -325,6 +325,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .clipboard_write_limit = opts.config.clipboard_write_limit,
         .enquiry_response = opts.config.enquiry_response,
         .xt_checksum_report = opts.config.xt_checksum_report,
+        .suppress_replies = opts.backend == .external,
     };
 
     const thread_enter_state = try ThreadEnterState.create(
@@ -523,6 +524,14 @@ pub fn resize(
 
     // Update the size of our pty.
     try self.backend.resize(grid_size, size.terminal());
+
+    // An external terminal resizes when its remote side says so; see
+    // termio.External.setGrid. The renderer still needs the view's size.
+    if (self.backend == .external) {
+        _ = self.renderer_mailbox.push(global.io(), .{ .resize = size }, .{ .forever = {} });
+        self.renderer_wakeup.notify() catch {};
+        return;
+    }
 
     // Enter the critical area that we want to keep small
     {

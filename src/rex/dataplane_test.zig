@@ -294,11 +294,10 @@ test "rex data plane: a stalled client neither delays others nor stays stale" {
 
     var a = try Conn.open(h.path);
     defer a.close();
-    // Several times the 1 MiB outbox cap, all on one line: scrollback
-    // pruning drops whole pages, and a terminal restored from a snapshot
-    // doesn't share the server's page boundaries.
+    // Several times the 1 MiB outbox cap, in enough lines to prune
+    // scrollback long after A's snapshot, which comes before the output.
     const block = try createSession(&a,
-        \\read x; yes 'output that a stalled client cannot keep up with' | head -n 80000 | tr '\n' '\r'; echo; echo done; exec cat
+        \\read x; yes 'output that a stalled client cannot keep up with' | head -n 80000; echo done; exec cat
     );
     defer alloc.free(block);
 

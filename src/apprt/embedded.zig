@@ -20,6 +20,7 @@ const CoreApp = @import("../App.zig");
 const CoreInspector = @import("../inspector/main.zig").Inspector;
 const CoreSurface = @import("../Surface.zig");
 const configpkg = @import("../config.zig");
+const termio = @import("../termio.zig");
 const Config = configpkg.Config;
 const String = @import("../main_c.zig").String;
 
@@ -458,6 +459,19 @@ pub const Surface = struct {
     /// that getTitle works without the implementer needing to save it.
     title: ?[:0]const u8 = null,
 
+    /// Set when the embedder does the terminal's I/O. CoreSurface reads it.
+    io_external: ?termio.External = null,
+
+    /// How a surface's terminal gets its I/O.
+    pub const IoMode = enum(c_int) {
+        /// Run a command on a local pty.
+        exec = 0,
+
+        /// The embedder runs the program, e.g. in a rap server. See
+        /// termio.External and ghostty_surface_process_output.
+        external = 1,
+    };
+
     /// Surface initialization options.
     pub const Options = extern struct {
         /// The platform that this surface is being initialized for and
@@ -499,6 +513,15 @@ pub const Surface = struct {
 
         /// Context for the new surface
         context: apprt.surface.NewSurfaceContext = .window,
+
+        /// How the terminal gets its I/O. With `external`, the command,
+        /// working directory, env vars and initial input are unused, and
+        /// the callbacks below get the user's input, view size and focus.
+        io_mode: IoMode = .exec,
+        io_userdata: ?*anyopaque = null,
+        io_write_cb: ?termio.External.WriteFn = null,
+        io_resize_cb: ?termio.External.ResizeFn = null,
+        io_focus_cb: ?termio.External.FocusFn = null,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -513,6 +536,15 @@ pub const Surface = struct {
             },
             .size = .{ .width = 800, .height = 600 },
             .cursor_pos = .{ .x = -1, .y = -1 },
+            .io_external = switch (opts.io_mode) {
+                .exec => null,
+                .external => .{
+                    .userdata = opts.io_userdata,
+                    .write_cb = opts.io_write_cb,
+                    .resize_cb = opts.io_resize_cb,
+                    .focus_cb = opts.io_focus_cb,
+                },
+            },
         };
 
         // Add ourselves to the list of surfaces on the app.
@@ -1859,6 +1891,52 @@ pub const CAPI = struct {
     /// Returns true if the surface process has exited.
     export fn ghostty_surface_process_exited(surface: *Surface) bool {
         return surface.core_surface.child_exited;
+    }
+
+    /// Feed the program's output to an external surface's terminal.
+    export fn ghostty_surface_process_output(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) void {
+        const io = &surface.core_surface.io;
+        io.processOutput(ptr[0..len]);
+        io.renderer_state.yieldToDemand(global.io());
+    }
+
+    /// Replace an external surface's terminal with a snapshot of the
+    /// remote one. Returns false if the snapshot doesn't decode, leaving
+    /// the terminal as it was.
+    export fn ghostty_surface_load_snapshot(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) bool {
+        termio.External.loadSnapshot(&surface.core_surface.io, ptr[0..len]) catch |err| {
+            log.err("error loading snapshot err={}", .{err});
+            return false;
+        };
+        return true;
+    }
+
+    /// The remote terminal of an external surface resized to this grid.
+    export fn ghostty_surface_set_grid(surface: *Surface, cols: u16, rows: u16) void {
+        if (cols == 0 or rows == 0) return;
+        termio.External.setGrid(&surface.core_surface.io, cols, rows) catch |err| {
+            log.err("error setting grid err={}", .{err});
+        };
+    }
+
+    /// The program of an external surface exited with this code.
+    export fn ghostty_surface_child_exited(surface: *Surface, code: u32) void {
+        // The remote side knows how long the program ran; never treat
+        // the exit as an abnormal, too-quick one.
+        surface.core_surface.handleMessage(.{ .child_exited = .{
+            .exit_code = code,
+            .runtime_ms = std.math.maxInt(u64),
+        } }) catch |err| {
+            log.err("error handling child exit err={}", .{err});
+        };
     }
 
     /// Returns true if the surface has a selection.

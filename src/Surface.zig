@@ -660,8 +660,17 @@ pub fn init(
             std.mem.print(&buf, "0x{x:0>16}", .{self.id}) catch unreachable,
         );
 
-        // Initialize our IO backend
-        var io_exec = try termio.Exec.init(alloc, .{
+        // Initialize our IO backend. An apprt may hand I/O to its embedder
+        // instead of a local process (termio.External).
+        const io_external: ?termio.External = if (@hasField(apprt.runtime.Surface, "io_external"))
+            rt_surface.io_external
+        else
+            null;
+        if (io_external != null) {
+            env.deinit();
+            env = .init(alloc);
+        }
+        var io_backend: termio.Backend = if (io_external) |v| .{ .external = v } else .{ .exec = try termio.Exec.init(alloc, .{
             .command = command,
             .env = env,
             .env_override = config.env,
@@ -673,8 +682,8 @@ pub fn init(
             .term = config.term,
             .rt_pre_exec_info = .init(config),
             .rt_post_fork_info = .init(config),
-        });
-        errdefer io_exec.deinit();
+        }) };
+        errdefer io_backend.deinit();
 
         // Initialize our IO mailbox
         var io_mailbox = try termio.Mailbox.initSPSC(alloc);
@@ -684,7 +693,7 @@ pub fn init(
             .size = size,
             .full_config = config,
             .config = try termio.Termio.DerivedConfig.init(alloc, config),
-            .backend = .{ .exec = io_exec },
+            .backend = io_backend,
             .mailbox = io_mailbox,
             .renderer_state = &self.renderer_state,
             .renderer_wakeup = render_thread.wakeup,
@@ -1353,6 +1362,7 @@ fn childExitedAbnormally(
     // Build up our command for the error message
     const command = try std.mem.join(alloc, " ", switch (self.io.backend) {
         .exec => |*exec| exec.subprocess.args,
+        .external => &.{},
     });
     const runtime_str = try alloc.print("{d} ms", .{info.runtime_ms});
 
