@@ -339,19 +339,76 @@ test "rex client: an external surface gets the exit after a full app mailbox" {
     } else return error.Timeout;
     try std.Io.sleep(testing.io, .fromMilliseconds(200), .awake);
 
+    // As the app's ticks do. The bells that waited coalesce.
     var bells: usize = 0;
     for (0..1000) |_| {
         while (s.app_mailbox.pop(testing.io)) |msg| switch (msg.surface_message.message) {
             .ring_bell => bells += 1,
             .child_exited => |e| {
-                try testing.expectEqual(200, bells);
+                try testing.expect(bells > 64);
                 return testing.expectEqual(3, e.exit_code);
             },
             else => {},
         };
+        External.flushPending(&s.io);
         try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
     }
     return error.Timeout;
+}
+
+test "rex client: a pane the app isn't draining never holds up the others" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const apprt = @import("../apprt.zig");
+    if (comptime apprt.runtime != apprt.none) return error.SkipZigTest;
+    const External = @import("../termio.zig").External;
+    var h: Harness = undefined;
+    try h.start();
+    defer h.stop();
+    const client = try Client.connect(alloc, testing.io, h.path, null);
+    defer client.deinit();
+
+    var blocks: [2][]u8 = undefined;
+    for (&blocks, [_][]const u8{
+        "read x; i=0; while [ $i -lt 200 ]; do printf '\\a'; i=$((i+1)); done; exec cat",
+        "exec cat",
+    }) |*blk, script| {
+        const r = try call(client, .{ .method = "session.create", .params = .{
+            .cols = 80,
+            .rows = 24,
+            .command = [_][]const u8{ "/bin/sh", "-c", script },
+        } });
+        defer r.deinit();
+        blk.* = try alloc.dupe(u8, result(r).object.get("block").?.string);
+    }
+    defer for (blocks) |blk| alloc.free(blk);
+
+    const a = try client.newBinding();
+    var sa: External.TestSurface = undefined;
+    try sa.initWith(.{ .userdata = a, .write_cb = Client.Binding.onWrite });
+    defer sa.deinit();
+    try client.bind(a, blocks[0], External.sink(&sa.io));
+    defer client.unbind(a);
+    const b = try client.newBinding();
+    var sb: External.TestSurface = undefined;
+    try sb.initWith(.{});
+    defer sb.deinit();
+    try client.bind(b, blocks[1], External.sink(&sb.io));
+
+    // A's bells fill the app's mailbox, which the app doesn't drain.
+    try sa.write("go\n");
+    for (0..1000) |_| {
+        if (sa.app_mailbox.len == 64) break;
+        try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
+    } else return error.Timeout;
+    try std.Io.sleep(testing.io, .fromMilliseconds(200), .awake);
+
+    client.unbind(b);
+    var ts: TestSink = .{ .mirror = .init(alloc, testing.io) };
+    defer ts.mirror.deinit();
+    const c2 = try client.newBinding();
+    defer client.unbind(c2);
+    try client.bind(c2, blocks[1], ts.sink());
+    (try call(client, .{ .method = "session.list", .params = .{} })).deinit();
 }
 
 test "rex client: gives up on a block whose snapshot never loads" {

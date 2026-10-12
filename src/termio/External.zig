@@ -7,8 +7,8 @@
 //! The remote side answers the program's queries, so the stream handler
 //! drops this terminal's own replies, and the terminal only resizes when
 //! the remote side says it did (`setGrid`). Whoever feeds it may be a
-//! thread the app waits on, so the app detaches it (`Feed.Sink.detach`)
-//! before it waits, which ends any wait for room in the app's mailbox.
+//! thread the app waits on, so it never waits for the app's mailbox:
+//! messages that don't fit wait in `Pending` for the app's next tick.
 //!
 //! The callbacks run on the termio thread.
 const External = @This();
@@ -23,6 +23,7 @@ const restore = @import("../rex/restore.zig");
 const Feed = @import("../rex/Feed.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 const App = @import("../App.zig");
+const apprt = @import("../apprt.zig");
 
 const log = std.log.scoped(.io_external);
 
@@ -182,6 +183,58 @@ pub fn setGrid(io: *termio.Termio, cols: u16, rows: u16) !void {
     try io.renderer_wakeup.notify();
 }
 
+/// Messages for the surface that the app's mailbox had no room for. They
+/// wait here, in order, until the app's tick moves them (`flushPending`).
+pub const Pending = struct {
+    lock: std.Io.Mutex = .init,
+    msgs: std.ArrayList(apprt.surface.Message) = .empty,
+
+    pub fn deinit(self: *Pending, alloc: Allocator) void {
+        for (self.msgs.items) |m| m.deinit();
+        self.msgs.deinit(alloc);
+    }
+
+    /// Send `msg` after any messages still waiting, without waiting for
+    /// the app.
+    pub fn push(self: *Pending, alloc: Allocator, mailbox: apprt.surface.Mailbox, msg: apprt.surface.Message) void {
+        self.lock.lockUncancelable(global.io());
+        defer self.lock.unlock(global.io());
+        if (self.msgs.items.len == 0 and mailbox.push(msg, .{ .instant = {} }) != 0) return;
+        // Only the latest of these matters. ponytail: other kinds queue
+        // without a bound; cap them if a program can flood one.
+        switch (msg) {
+            .set_title, .pwd_change, .ring_bell, .set_mouse_shape, .progress_report => {
+                for (self.msgs.items, 0..) |m, i| if (std.meta.activeTag(m) == std.meta.activeTag(msg)) {
+                    self.msgs.orderedRemove(i).deinit();
+                    break;
+                };
+            },
+            else => {},
+        }
+        self.msgs.append(alloc, msg) catch {
+            log.warn("out of memory, dropping surface message {t}", .{msg});
+            return msg.deinit();
+        };
+        mailbox.app.rt_app.wakeup();
+    }
+
+    /// Move waiting messages into the app's mailbox while it has room.
+    fn flush(self: *Pending, mailbox: apprt.surface.Mailbox) void {
+        self.lock.lockUncancelable(global.io());
+        defer self.lock.unlock(global.io());
+        var n: usize = 0;
+        while (n < self.msgs.items.len and mailbox.push(self.msgs.items[n], .{ .instant = {} }) != 0) n += 1;
+        self.msgs.replaceRangeAssumeCapacity(0, n, &.{});
+    }
+};
+
+/// On the app's thread, each tick: move the surface's waiting messages
+/// into the app's mailbox.
+pub fn flushPending(io: *termio.Termio) void {
+    const h = &io.terminal_stream.handler;
+    if (h.surface_pending) |*p| p.flush(h.surface_mailbox);
+}
+
 /// The terminal as the target of a rap client's binding (rex/Client.zig),
 /// which feeds it on its reader thread.
 pub fn sink(io: *termio.Termio) Feed.Sink {
@@ -211,16 +264,11 @@ const sink_vtable: Feed.Sink.VTable = .{
             // As termio.Exec reports a local child's exit. The remote side
             // knows how long the program ran; never treat the exit as an
             // abnormal, too-quick one.
-            const io = sinkTermio(ctx);
-            if (!io.terminal_stream.handler.pushSurface(.{ .child_exited = .{
+            const h = &sinkTermio(ctx).terminal_stream.handler;
+            h.surface_pending.?.push(h.alloc, h.surface_mailbox, .{ .child_exited = .{
                 .exit_code = code,
                 .runtime_ms = std.math.maxInt(u64),
-            } })) log.info("detached, dropping child exit", .{});
-        }
-    }.f,
-    .detach = struct {
-        fn f(ctx: *anyopaque, on: bool) void {
-            sinkTermio(ctx).terminal_stream.handler.detaching.store(on, .release);
+            } });
         }
     }.f,
 };

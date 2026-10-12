@@ -63,10 +63,10 @@ pub const StreamHandler = struct {
     /// answered elsewhere (termio.External).
     suppress_replies: bool = false,
 
-    /// Stop waiting for room in the app's mailbox and drop messages for
-    /// the surface, for a terminal whose feeder the app is about to wait
-    /// on (termio.External).
-    detaching: std.atomic.Value(bool) = .init(false),
+    /// Hold messages for the surface when the app's mailbox is full rather
+    /// than wait for the app, for a terminal fed from a thread the app may
+    /// be waiting on (termio.External).
+    surface_pending: ?termio.External.Pending = null,
 
     //---------------------------------------------------------------
     // Internal state
@@ -108,6 +108,7 @@ pub const StreamHandler = struct {
     pub const tmux_enabled = terminal.options.tmux_control_mode;
 
     pub fn deinit(self: *StreamHandler) void {
+        if (self.surface_pending) |*p| p.deinit(self.alloc);
         self.apc.deinit();
         self.dcs.deinit();
         self.kittyClipboardWriteAbort();
@@ -148,20 +149,12 @@ pub const StreamHandler = struct {
     ) void {
         // See messageWriter which has similar logic and explains why
         // we may have to do this.
+        if (self.surface_pending) |*p| return p.push(self.alloc, self.surface_mailbox, msg);
         if (self.surface_mailbox.push(msg, .{ .instant = {} }) == 0) {
             self.renderer_state.mutex.unlock(global.io());
             defer self.renderer_state.mutex.lockUncancelable(global.io());
-            if (!self.pushSurface(msg)) msg.deinit();
+            _ = self.surface_mailbox.push(msg, .{ .forever = {} });
         }
-    }
-
-    /// Wait for room in the app's mailbox for `msg`. False if the
-    /// terminal detached first, which drops it.
-    pub fn pushSurface(self: *StreamHandler, msg: apprt.surface.Message) bool {
-        while (self.surface_mailbox.push(msg, .{ .ns = 10 * std.time.ns_per_ms }) == 0) {
-            if (self.detaching.load(.acquire)) return false;
-        }
-        return true;
     }
 
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
