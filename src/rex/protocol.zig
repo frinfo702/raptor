@@ -12,7 +12,8 @@
 //! Events reach only clients that called `session.subscribe`.
 //!
 //! The data plane streams blocks in binary frames. `block.subscribe`
-//! answers with a `stream` id, and every data frame starts with that id.
+//! answers with a `stream` id and the block's full id, and every data
+//! frame starts with that stream id. `block.unsubscribe` ends a stream.
 //! Each block counts the bytes its program has written as `seq`; a client
 //! that has applied everything through `seq` is in sync at that point.
 //! After subscribing the client gets either a snapshot (`snap` chunks at
@@ -241,6 +242,21 @@ pub fn socketPath(
 ) ![:0]u8 {
     if (flag orelse env.get("RAP_SERVER")) |p| if (p.len > 0) return alloc.dupeSentinel(u8, p, 0);
     return defaultSocketPath(alloc, env);
+}
+
+/// `socketPath`, made absolute, since the server and the programs in its
+/// blocks run elsewhere. Allocates more than the result; use an arena.
+pub fn resolveSocketPath(
+    alloc: Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    flag: ?[]const u8,
+) ![:0]u8 {
+    const path = try socketPath(alloc, env, flag);
+    if (std.fs.path.isAbsolute(path)) return path;
+    const cwd = try std.process.currentPathAlloc(io, alloc);
+    const abs = try std.fs.path.resolve(alloc, &.{ cwd, path });
+    return alloc.dupeSentinel(u8, abs, 0);
 }
 
 extern "c" fn confstr(name: c_int, buf: ?[*]u8, len: usize) usize;

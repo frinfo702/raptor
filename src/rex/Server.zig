@@ -1206,6 +1206,7 @@ const methods = std.StaticStringMap(Handler).initComptime(.{
     .{ "block.close", &blockClose },
     .{ "block.method", &blockMethod },
     .{ "block.subscribe", &blockSubscribe },
+    .{ "block.unsubscribe", &blockUnsubscribe },
     .{ "block.wait", &blockWait },
 });
 
@@ -1723,7 +1724,16 @@ fn blockSubscribe(self: *Server, req: *Request, w: *Stringify) Error!void {
     cl.streams.appendAssumeCapacity(st);
     pane.streams.appendAssumeCapacity(st);
     // The snapshot or replay follows the reply.
-    try w.write(.{ .stream = st.id });
+    try w.write(.{ .stream = st.id, .block = prefixed("block", &pane.id) });
+}
+
+fn blockUnsubscribe(self: *Server, req: *Request, w: *Stringify) Error!void {
+    const v = req.get("stream") orelse return req.fail(error.Usage, "missing stream", .{});
+    const id = if (v == .integer) std.math.cast(u32, v.integer) else null;
+    // A stream that is gone went with its block.
+    if (findStream(req.client, id orelse return req.fail(error.Usage, "stream must be a stream id", .{}))) |st|
+        self.removeStream(st);
+    try w.write(.{});
 }
 
 fn blockWait(self: *Server, req: *Request, w: *Stringify) Error!void {

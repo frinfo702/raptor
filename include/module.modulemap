@@ -3,5 +3,6 @@
 // unique names and we use Ghostty for other things.
 module GhosttyKit {
     umbrella header "ghostty.h"
+    header "raptor.h"
     export *
 }

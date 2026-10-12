@@ -24,13 +24,14 @@ pub fn init(
         Config.genericMacOSTarget(b, null),
     ));
 
-    // Generate a headers directory with only ghostty.h and the module
-    // map. We can't use include/ directly because it also contains the
+    // Generate a headers directory with only ghostty.h, raptor.h and the
+    // module map. We can't use include/ directly because it also contains the
     // libghostty-vt headers under include/ghostty/, which would trigger
     // "umbrella header does not include header" warnings from Clang's
     // module system.
     const wf = b.addWriteFiles();
     _ = wf.addCopyFile(b.path("include/ghostty.h"), "ghostty.h");
+    _ = wf.addCopyFile(b.path("include/raptor.h"), "raptor.h");
     _ = wf.addCopyFile(b.path("include/module.modulemap"), "module.modulemap");
     const headers = wf.getDirectory();
 

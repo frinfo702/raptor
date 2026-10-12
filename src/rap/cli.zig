@@ -1,12 +1,12 @@
 //! The `rap` commands that talk to the server.
 const std = @import("std");
-const builtin = @import("builtin");
 const posix = std.posix;
 const c = std.c;
 const Allocator = std.mem.Allocator;
 const EnvMap = std.process.Environ.Map;
 const Writer = std.Io.Writer;
 const protocol = @import("../rex/protocol.zig");
+const Client = @import("../rex/Client.zig");
 const ExitCode = @import("exit.zig").Code;
 
 pub const usage =
@@ -141,16 +141,6 @@ pub fn run(
     };
 }
 
-/// Make a relative socket path absolute, since the server and the
-/// programs in its blocks run elsewhere.
-pub fn resolveSocketPath(alloc: Allocator, io: std.Io, env: *const EnvMap, flag: ?[]const u8) ![:0]u8 {
-    const path = try protocol.socketPath(alloc, env, flag);
-    if (std.fs.path.isAbsolute(path)) return path;
-    const cwd = try std.process.currentPathAlloc(io, alloc);
-    const abs = try std.fs.path.resolve(alloc, &.{ cwd, path });
-    return alloc.dupeSentinel(u8, abs, 0);
-}
-
 const Ctx = struct {
     alloc: Allocator,
     io: std.Io,
@@ -220,25 +210,26 @@ const Ctx = struct {
     // Connection
 
     fn socketPath(self: *Ctx) Error![:0]u8 {
-        return resolveSocketPath(self.alloc, self.io, self.env, self.args.server);
+        return protocol.resolveSocketPath(self.alloc, self.io, self.env, self.args.server);
     }
 
     /// Connect, starting a server first if `autostart` and none is running.
     /// Null means the server is unreachable and that was reported.
     fn connect(self: *Ctx, autostart: bool) Error!?void {
         const path = try self.socketPath();
-        self.fd = protocol.connect(path) catch |e| fd: {
+        self.fd = Client.dial(self.alloc, self.io, path, if (autostart) try self.launch() else null) catch |e| {
             if (e != error.Unreachable) return e;
-            const allowed = if (self.env.get("RAP_AUTOSTART")) |v| !std.mem.eql(u8, v, "0") else true;
-            if (!autostart or !allowed) {
-                try self.err.print("rap: no server running on {s}\n", .{path});
-                return null;
-            }
-            try startServer(self.alloc, self.io, self.env, path, self.args.idle_timeout);
-            break :fd protocol.connect(path) catch {
-                try self.err.print("rap: no server running on {s}\n", .{path});
-                return null;
-            };
+            try self.err.print("rap: no server running on {s}\n", .{path});
+            return null;
+        };
+    }
+
+    /// How to start a server: this executable's `server run`.
+    fn launch(self: *Ctx) Error!Client.Launch {
+        return .{
+            .exe = try std.process.executablePathAlloc(self.io, self.alloc),
+            .env = self.env,
+            .idle_timeout = self.args.idle_timeout,
         };
     }
 
@@ -619,7 +610,7 @@ const Ctx = struct {
                 try self.out.print("server already running on {s}\n", .{path});
                 return .ok;
             } else |_| {}
-            try startServer(self.alloc, self.io, self.env, path, self.args.idle_timeout);
+            try Client.launchServer(self.alloc, self.io, try self.launch(), path);
             return .ok;
         }
         if (std.mem.eql(u8, sub, "stop")) {
@@ -695,78 +686,6 @@ fn kib(bytes: i64) f64 {
 
 fn exitStatus(code: i64) ExitCode {
     return @fromBackingInt(@intCast(std.math.cast(u8, code) orelse 1));
-}
-
-/// Where the background server logs.
-fn logPath(alloc: Allocator, env: *const EnvMap) !?[]u8 {
-    const home = env.get("HOME") orelse return null;
-    if (comptime builtin.os.tag.isDarwin())
-        return try std.fmt.allocPrint(alloc, "{s}/Library/Logs/Raptor/server.log", .{home});
-    if (env.get("XDG_STATE_HOME")) |dir| if (dir.len > 0)
-        return try std.fmt.allocPrint(alloc, "{s}/raptor/server.log", .{dir});
-    return try std.fmt.allocPrint(alloc, "{s}/.local/state/raptor/server.log", .{home});
-}
-
-/// Start `rap server run` in its own session with a minimal environment,
-/// output going to the log, and wait for it to listen.
-pub fn startServer(
-    alloc: Allocator,
-    io: std.Io,
-    env: *const EnvMap,
-    socket_path: [:0]const u8,
-    idle_timeout: ?[]const u8,
-) !void {
-    const exe = try std.process.executablePathAlloc(io, alloc);
-
-    var argv: std.ArrayList(?[*:0]const u8) = .empty;
-    try argv.appendSlice(alloc, &.{ exe, "server", "run", "-S", socket_path });
-    if (idle_timeout) |t| try argv.appendSlice(alloc, &.{ "--idle-timeout", try alloc.dupeSentinel(u8, t, 0) });
-    try argv.append(alloc, null);
-
-    var envp: std.ArrayList(?[*:0]const u8) = .empty;
-    for (protocol.daemon_env) |k| if (env.get(k)) |v|
-        try envp.append(alloc, try std.fmt.allocPrintSentinel(alloc, "{s}={s}", .{ k, v }, 0));
-    try envp.append(alloc, null);
-
-    const log_fd: c_int = log: {
-        const path = try logPath(alloc, env) orelse break :log -1;
-        std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(path).?) catch {};
-        const pathz = try alloc.dupeSentinel(u8, path, 0);
-        break :log c.open(pathz, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, @as(c.mode_t, 0o600));
-    };
-    const home: ?[:0]u8 = if (env.get("HOME")) |h| try alloc.dupeSentinel(u8, h, 0) else null;
-
-    const pid = c.fork();
-    if (pid < 0) return error.ForkFailed;
-    if (pid == 0) {
-        _ = c.setsid();
-        const devnull = c.open("/dev/null", .{ .ACCMODE = .RDWR });
-        _ = c.dup2(devnull, 0);
-        _ = c.dup2(if (log_fd >= 0) log_fd else devnull, 1);
-        _ = c.dup2(if (log_fd >= 0) log_fd else devnull, 2);
-        if (home) |h| _ = c.chdir(h);
-        _ = c.execve(exe, @ptrCast(argv.items.ptr), @ptrCast(envp.items.ptr));
-        c._exit(127);
-    }
-    if (log_fd >= 0) _ = c.close(log_fd);
-
-    // A cold start of a debug build takes a moment.
-    for (0..200) |_| {
-        if (protocol.connect(socket_path)) |fd| {
-            _ = c.close(fd);
-            return;
-        } else |_| {}
-        var status: c_int = 0;
-        if (c.waitpid(pid, &status, c.W.NOHANG) == pid) {
-            // It lost a race with another server starting on this socket.
-            if (protocol.connect(socket_path)) |fd| {
-                _ = c.close(fd);
-                return;
-            } else |_| return error.ServerFailedToStart;
-        }
-        try std.Io.sleep(io, .fromMilliseconds(25), .awake);
-    }
-    return error.ServerStartTimedOut;
 }
 
 /// Append `text` with C-style escapes decoded.

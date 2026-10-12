@@ -6,7 +6,9 @@
 //!
 //! The remote side answers the program's queries, so the stream handler
 //! drops this terminal's own replies, and the terminal only resizes when
-//! the remote side says it did (`setGrid`).
+//! the remote side says it did (`setGrid`). Whoever feeds it may be a
+//! thread the app waits on, so it never waits for the app's mailbox:
+//! messages that don't fit wait in `Pending` for the app's next tick.
 //!
 //! The callbacks run on the termio thread.
 const External = @This();
@@ -18,7 +20,12 @@ const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
 const restore = @import("../rex/restore.zig");
+const Feed = @import("../rex/Feed.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
+const App = @import("../App.zig");
+const apprt = @import("../apprt.zig");
+
+const log = std.log.scoped(.io_external);
 
 /// Bytes for the program: keys, text, mouse and focus reports.
 pub const WriteFn = *const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void;
@@ -176,9 +183,126 @@ pub fn setGrid(io: *termio.Termio, cols: u16, rows: u16) !void {
     try io.renderer_wakeup.notify();
 }
 
+/// Messages for the surface that the app's mailbox had no room for. They
+/// wait here, in order, until the app's tick moves them (`flushPending`).
+pub const Pending = struct {
+    lock: std.Io.Mutex = .init,
+    msgs: std.ArrayList(apprt.surface.Message) = .empty,
+
+    pub fn deinit(self: *Pending, alloc: Allocator) void {
+        for (self.msgs.items) |m| m.deinit();
+        self.msgs.deinit(alloc);
+    }
+
+    /// Send `msg` after any messages still waiting, without waiting for
+    /// the app.
+    pub fn push(self: *Pending, alloc: Allocator, mailbox: apprt.surface.Mailbox, msg: apprt.surface.Message) void {
+        self.lock.lockUncancelable(global.io());
+        defer self.lock.unlock(global.io());
+        if (self.msgs.items.len == 0 and mailbox.push(msg, .{ .instant = {} }) != 0) return;
+        for (self.msgs.items, 0..) |m, i| if (supersedes(msg, m)) {
+            self.msgs.orderedRemove(i).deinit();
+            break;
+        };
+        // ponytail: past `cap` waiting messages the oldest go, which can
+        // lose a clipboard request or a color; raise it if that matters.
+        if (self.msgs.items.len >= cap) for (self.msgs.items, 0..) |m, i| if (m != .child_exited) {
+            self.msgs.orderedRemove(i).deinit();
+            break;
+        };
+        self.msgs.append(alloc, msg) catch {
+            log.warn("out of memory, dropping surface message {t}", .{msg});
+            return msg.deinit();
+        };
+        mailbox.app.rt_app.wakeup();
+    }
+
+    pub const cap = 256;
+
+    /// Whether `new` makes `old` pointless to deliver: only the latest
+    /// state of a kind (per color or clipboard) matters.
+    fn supersedes(new: apprt.surface.Message, old: apprt.surface.Message) bool {
+        return switch (new) {
+            .set_title,
+            .pwd_change,
+            .ring_bell,
+            .set_mouse_shape,
+            .progress_report,
+            .report_title,
+            .resize_window,
+            .clipboard_read,
+            => std.meta.activeTag(old) == std.meta.activeTag(new),
+            .start_command, .stop_command => old == .start_command or old == .stop_command,
+            .color_change => |c| old == .color_change and std.meta.eql(old.color_change.target, c.target),
+            .clipboard_write => |w| old == .clipboard_write and old.clipboard_write.clipboard_type == w.clipboard_type,
+            .kitty_clipboard_read => |r| old == .kitty_clipboard_read and old.kitty_clipboard_read.location == r.location,
+            .kitty_clipboard_write => |w| old == .kitty_clipboard_write and old.kitty_clipboard_write.location == w.location,
+            else => false,
+        };
+    }
+
+    /// Move waiting messages into the app's mailbox while it has room.
+    fn flush(self: *Pending, mailbox: apprt.surface.Mailbox) void {
+        self.lock.lockUncancelable(global.io());
+        defer self.lock.unlock(global.io());
+        var n: usize = 0;
+        while (n < self.msgs.items.len and mailbox.push(self.msgs.items[n], .{ .instant = {} }) != 0) n += 1;
+        self.msgs.replaceRangeAssumeCapacity(0, n, &.{});
+    }
+};
+
+/// On the app's thread, each tick: move the surface's waiting messages
+/// into the app's mailbox.
+pub fn flushPending(io: *termio.Termio) void {
+    const h = &io.terminal_stream.handler;
+    if (h.surface_pending) |*p| p.flush(h.surface_mailbox);
+}
+
+/// The terminal as the target of a rap client's binding (rex/Client.zig),
+/// which feeds it on its reader thread.
+pub fn sink(io: *termio.Termio) Feed.Sink {
+    return .{ .ctx = io, .vtable = &sink_vtable };
+}
+
+const sink_vtable: Feed.Sink.VTable = .{
+    .load = struct {
+        fn f(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+            return loadSnapshot(sinkTermio(ctx), bytes);
+        }
+    }.f,
+    .output = struct {
+        fn f(ctx: *anyopaque, bytes: []const u8) void {
+            const io = sinkTermio(ctx);
+            io.processOutput(bytes);
+            io.renderer_state.yieldToDemand(global.io());
+        }
+    }.f,
+    .grid = struct {
+        fn f(ctx: *anyopaque, cols: u16, rows: u16) anyerror!void {
+            return setGrid(sinkTermio(ctx), cols, rows);
+        }
+    }.f,
+    .exited = struct {
+        fn f(ctx: *anyopaque, code: u32) void {
+            // As termio.Exec reports a local child's exit. The remote side
+            // knows how long the program ran; never treat the exit as an
+            // abnormal, too-quick one.
+            const h = &sinkTermio(ctx).terminal_stream.handler;
+            h.surface_pending.?.push(h.alloc, h.surface_mailbox, .{ .child_exited = .{
+                .exit_code = code,
+                .runtime_ms = std.math.maxInt(u64),
+            } });
+        }
+    }.f,
+};
+
+fn sinkTermio(ctx: *anyopaque) *termio.Termio {
+    return @ptrCast(@alignCast(ctx));
+}
+
 /// A Termio with this backend and its thread, set up the way CoreSurface
 /// sets them up, without a renderer or an app. It records the callbacks.
-const TestSurface = struct {
+pub const TestSurface = struct {
     const testing = std.testing;
     const configpkg = @import("../config.zig");
     const xev = global.xev;
@@ -188,6 +312,8 @@ const TestSurface = struct {
     renderer_state: renderer.State,
     renderer_wakeup: xev.Async,
     renderer_mailbox: *renderer.Thread.Mailbox,
+    /// The app's mailbox, which nothing drains but the test.
+    app_mailbox: *App.Mailbox.Queue,
     io: termio.Termio,
     thread: termio.Thread,
     thr: std.Thread,
@@ -197,19 +323,30 @@ const TestSurface = struct {
     written: std.ArrayList(u8) = .empty,
     resizes: std.ArrayList([2]u16) = .empty,
 
-    const size: renderer.Size = .{
+    pub const size: renderer.Size = .{
         .screen = .{ .width = 800, .height = 480 },
         .cell = .{ .width = 10, .height = 20 },
         .padding = .{},
     };
 
-    fn init(self: *TestSurface) !void {
+    pub fn init(self: *TestSurface) !void {
+        try self.initWith(.{
+            .userdata = self,
+            .write_cb = onWrite,
+            .resize_cb = onResize,
+        });
+    }
+
+    /// Init with other callbacks, which leaves `written` and `resizes`
+    /// empty.
+    pub fn initWith(self: *TestSurface, backend: External) !void {
         const alloc = testing.allocator;
         self.* = .{
             .config = try .default(alloc),
             .renderer_state = undefined,
             .renderer_wakeup = try .init(),
             .renderer_mailbox = try .create(alloc),
+            .app_mailbox = try .create(alloc),
             .io = undefined,
             .thread = try .init(alloc),
             .thr = undefined,
@@ -219,28 +356,26 @@ const TestSurface = struct {
             .size = size,
             .full_config = &self.config,
             .config = try .init(alloc, &self.config),
-            .backend = .{ .external = .{
-                .userdata = self,
-                .write_cb = onWrite,
-                .resize_cb = onResize,
-            } },
+            .backend = .{ .external = backend },
             .mailbox = try .initSPSC(alloc),
             .renderer_state = &self.renderer_state,
             .renderer_wakeup = self.renderer_wakeup,
             .renderer_mailbox = self.renderer_mailbox,
-            // Nothing these tests do messages the surface.
-            .surface_mailbox = undefined,
+            // Only a runtime with no app loop to wake takes an undefined
+            // app.
+            .surface_mailbox = .{ .surface = undefined, .app = .{ .rt_app = undefined, .mailbox = self.app_mailbox } },
         });
         self.thr = try .spawn(.{}, termio.Thread.threadMain, .{ &self.thread, &self.io });
     }
 
-    fn deinit(self: *TestSurface) void {
+    pub fn deinit(self: *TestSurface) void {
         const alloc = testing.allocator;
         self.thread.stop.notify() catch unreachable;
         self.thr.join();
         self.thread.deinit();
         self.io.deinit();
         self.renderer_mailbox.destroy(alloc);
+        self.app_mailbox.destroy(alloc);
         self.renderer_wakeup.deinit();
         self.config.deinit();
         self.written.deinit(alloc);
@@ -262,7 +397,7 @@ const TestSurface = struct {
     }
 
     /// Send the user's input the way CoreSurface does.
-    fn write(self: *TestSurface, data: []const u8) !void {
+    pub fn write(self: *TestSurface, data: []const u8) !void {
         self.io.queueMessage(try termio.Message.writeReq(testing.allocator, data), .unlocked);
     }
 
@@ -280,7 +415,7 @@ const TestSurface = struct {
         return error.Timeout;
     }
 
-    fn plainAll(self: *TestSurface) ![]const u8 {
+    pub fn plainAll(self: *TestSurface) ![]const u8 {
         self.mutex.lockUncancelable(testing.io);
         defer self.mutex.unlock(testing.io);
         return self.io.terminal.screens.active.dumpStringAlloc(testing.allocator, .{ .screen = .{} });

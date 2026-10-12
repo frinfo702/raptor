@@ -160,6 +160,17 @@ pub const Message = union(enum) {
     /// Renderer pushed a new frame, redraw this surface.
     redraw,
 
+    /// Free a message that was never delivered.
+    pub fn deinit(self: Message) void {
+        switch (self) {
+            .kitty_clipboard_read => |req| req.destroy(),
+            .kitty_clipboard_write => |req| req.destroy(),
+            .clipboard_write => |w| w.req.deinit(),
+            .pwd_change => |w| w.deinit(),
+            else => {},
+        }
+    }
+
     pub const ReportTitleStyle = enum {
         csi_21_t,
 

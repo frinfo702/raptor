@@ -14,6 +14,7 @@ const configpkg = @import("config.zig");
 const Config = configpkg.Config;
 const BlockingQueue = @import("datastruct/main.zig").BlockingQueue;
 const renderer = @import("renderer.zig");
+const termio = @import("termio.zig");
 const font = @import("font/main.zig");
 const global = @import("global.zig");
 
@@ -173,6 +174,7 @@ pub fn destroy(self: *App) void {
 pub fn tick(self: *App, rt_app: *apprt.App) !void {
     // Drain our mailbox
     try self.drainMailbox(rt_app);
+    for (self.surfaces.items) |s| termio.External.flushPending(&s.core().io);
 }
 
 /// Update the configuration associated with the app. This can only be

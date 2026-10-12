@@ -9,6 +9,7 @@ const global = @import("global.zig");
 const exit = @import("rap/exit.zig");
 const cli = @import("rap/cli.zig");
 const Server = @import("rex/Server.zig");
+const protocol = @import("rex/protocol.zig");
 
 pub const ExitCode = exit.Code;
 
@@ -85,7 +86,7 @@ fn serverRun(init: std.process.Init, args: cli.Args, stderr: *std.Io.Writer) !Ex
         }
         break :ms @intFromFloat(secs * 1000);
     } else 30_000;
-    const path = try cli.resolveSocketPath(alloc, init.io, init.environ_map, args.server);
+    const path = try protocol.resolveSocketPath(alloc, init.io, init.environ_map, args.server);
 
     // The pty and process code expects Ghostty's global state.
     try global.init(.{ .tool = init.minimal });

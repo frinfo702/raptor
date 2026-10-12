@@ -110,6 +110,9 @@ pub fn initShared(
     });
     _ = try deps.add(lib);
 
+    // The macOS app links Metal itself; a standalone dylib must.
+    if (deps.config.renderer == .metal) lib.root_module.linkFramework("Metal", .{});
+
     // On Windows with MSVC, building a DLL requires the full CRT library
     // chain. linkLibC() (called via deps.add) provides msvcrt.lib, but
     // that references symbols in vcruntime.lib and ucrt.lib. Zig's library
@@ -239,6 +242,10 @@ pub fn installHeader(self: *const GhosttyLib) void {
         "ghostty.h",
     );
     b.getInstallStep().dependOn(&header_install.step);
+    b.getInstallStep().dependOn(&b.addInstallHeaderFile(
+        b.path("include/raptor.h"),
+        "raptor.h",
+    ).step);
 }
 
 const PkgConfigFiles = struct {
