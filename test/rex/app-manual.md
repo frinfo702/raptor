@@ -63,4 +63,4 @@ cd macos && xcodebuild test -scheme Ghostty -skip-testing GhosttyUITests \
 
 `test/rex/frame-compare.sh` checks the title bar and splits against Rex's
 reference frames (title bar height, tab pill size, theme token colours) and
-writes side-by-side images; `test/rex/frame-compare/` has the latest ones.
+writes side-by-side images to its output directory.

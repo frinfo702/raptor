@@ -21,8 +21,7 @@ final class RaptorClient {
 
     /// Connect to the server on `socket`, else on the default socket, starting it if needed.
     init?(socket: String? = nil) {
-        Self.startServer(socket: socket)
-        guard let client = rap_client_connect(socket) else {
+        guard Self.startServer(socket: socket), let client = rap_client_connect(socket) else {
             Self.logger.warning("no rap server")
             return nil
         }
@@ -32,7 +31,7 @@ final class RaptorClient {
             let me = Unmanaged<RaptorClient>.fromOpaque(userdata).takeUnretainedValue()
             let data = Data(bytes: json, count: strlen(json))
             DispatchQueue.main.async { me.handle(data) }
-        }, Unmanaged.passUnretained(self).toOpaque())
+        }, Unmanaged.passRetained(self).toOpaque())
         call("session.subscribe")
     }
 
@@ -40,12 +39,12 @@ final class RaptorClient {
 
     /// Copy the bundled `rap` to a path named for its contents, outside the bundle, and
     /// start a server from there if none is running. An app update then never swaps the
-    /// binary out from under a running server.
-    private static func startServer(socket: String?) {
+    /// binary out from under a running server. False if no server could be started.
+    private static func startServer(socket: String?) -> Bool {
         guard let bundled = Bundle.main.url(forAuxiliaryExecutable: "rap"),
               let rap = versionedCopy(of: bundled) else {
             logger.warning("no rap helper in the app bundle")
-            return
+            return false
         }
         let process = Process()
         process.executableURL = rap
@@ -55,7 +54,9 @@ final class RaptorClient {
             process.waitUntilExit()
         } catch {
             logger.warning("starting the rap server failed: \(error, privacy: .public)")
+            return false
         }
+        return process.terminationStatus == 0
     }
 
     // ponytail: copies of older builds pile up; prune ones no server runs from if it matters.

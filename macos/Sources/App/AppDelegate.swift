@@ -769,6 +769,11 @@ class AppDelegate: NSObject,
         guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
         guard let window = surfaceView.window else { return }
 
+        if let raptor = window.windowController as? RaptorController {
+            raptor.newTab()
+            return
+        }
+
         // We only want to listen to new tabs if the focused parent is
         // a regular terminal controller.
         guard window.windowController is TerminalController else { return }
@@ -995,6 +1000,10 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newTab(_ sender: Any?) {
+        if let raptor = NSApp.mainWindow?.windowController as? RaptorController {
+            raptor.newTab()
+            return
+        }
         _ = TerminalController.newTab(
             ghostty,
             from: TerminalController.preferredParent?.window
