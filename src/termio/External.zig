@@ -6,7 +6,8 @@
 //!
 //! The remote side answers the program's queries, so the stream handler
 //! drops this terminal's own replies, and the terminal only resizes when
-//! the remote side says it did (`setGrid`).
+//! the remote side says it did (`setGrid`). Whoever feeds it may be a
+//! thread the app waits on, so it never waits for the app's mailbox.
 //!
 //! The callbacks run on the termio thread.
 const External = @This();
@@ -20,6 +21,8 @@ const termio = @import("../termio.zig");
 const restore = @import("../rex/restore.zig");
 const Feed = @import("../rex/Feed.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
+
+const log = std.log.scoped(.io_external);
 
 /// Bytes for the program: keys, text, mouse and focus reports.
 pub const WriteFn = *const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void;
@@ -205,11 +208,12 @@ const sink_vtable: Feed.Sink.VTable = .{
         fn f(ctx: *anyopaque, code: u32) void {
             // As termio.Exec reports a local child's exit. The remote side
             // knows how long the program ran; never treat the exit as an
-            // abnormal, too-quick one.
-            _ = sinkTermio(ctx).surface_mailbox.push(.{ .child_exited = .{
+            // abnormal, too-quick one. Never wait for the app, which may be
+            // waiting on the caller to unbind.
+            if (sinkTermio(ctx).surface_mailbox.push(.{ .child_exited = .{
                 .exit_code = code,
                 .runtime_ms = std.math.maxInt(u64),
-            } }, .{ .forever = {} });
+            } }, .{ .instant = {} }) == 0) log.warn("app mailbox full, dropping child exit", .{});
         }
     }.f,
 };

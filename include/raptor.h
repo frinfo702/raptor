@@ -61,7 +61,9 @@ GHOSTTY_API void rap_client_surface_config(rap_client_t,
 
 // Show the block (its id, or anything else block.subscribe takes) in a
 // surface created from rap_client_surface_config, replacing what it
-// showed. Returns false if the server has no such block.
+// showed. Returns false if the server has no such block. The surface
+// hears that the block's program exited only while the client has a
+// session.subscribe covering the block's session.
 GHOSTTY_API bool rap_client_bind(rap_client_t,
                                  const char* block,
                                  ghostty_surface_t);

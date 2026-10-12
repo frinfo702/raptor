@@ -63,6 +63,11 @@ pub const StreamHandler = struct {
     /// answered elsewhere (termio.External).
     suppress_replies: bool = false,
 
+    /// Drop messages for the surface when the app's mailbox is full rather
+    /// than wait for the app, for a terminal fed from a thread the app may
+    /// be waiting on (termio.External).
+    never_wait_on_surface: bool = false,
+
     //---------------------------------------------------------------
     // Internal state
 
@@ -144,6 +149,10 @@ pub const StreamHandler = struct {
         // See messageWriter which has similar logic and explains why
         // we may have to do this.
         if (self.surface_mailbox.push(msg, .{ .instant = {} }) == 0) {
+            if (self.never_wait_on_surface) {
+                log.warn("app mailbox full, dropping surface message {t}", .{msg});
+                return msg.deinit();
+            }
             self.renderer_state.mutex.unlock(global.io());
             defer self.renderer_state.mutex.lockUncancelable(global.io());
             _ = self.surface_mailbox.push(msg, .{ .forever = {} });

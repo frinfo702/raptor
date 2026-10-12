@@ -298,3 +298,59 @@ test "rex client: binds an external-I/O surface" {
         try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
     } else return error.Timeout;
 }
+
+test "rex client: gives up on a block whose snapshot never loads" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    var h: Harness = undefined;
+    try h.start();
+    defer h.stop();
+    const client = try Client.connect(alloc, testing.io, h.path, null);
+    defer client.deinit();
+
+    const r = try call(client, .{ .method = "session.create", .params = .{
+        .cols = 80,
+        .rows = 24,
+        .command = [_][]const u8{ "/bin/sh", "-c", "exec cat" },
+    } });
+    defer r.deinit();
+    const block = result(r).object.get("block").?.string;
+
+    const Failing = struct {
+        loads: std.atomic.Value(usize) = .init(0),
+
+        const Self = @This();
+        const vtable: Feed.Sink.VTable = .{
+            .load = struct {
+                fn f(ctx: *anyopaque, _: []const u8) anyerror!void {
+                    const self: *Self = @ptrCast(@alignCast(ctx));
+                    _ = self.loads.fetchAdd(1, .monotonic);
+                    return error.BadSnapshot;
+                }
+            }.f,
+            .output = struct {
+                fn f(_: *anyopaque, _: []const u8) void {}
+            }.f,
+            .grid = struct {
+                fn f(_: *anyopaque, _: u16, _: u16) anyerror!void {}
+            }.f,
+            .exited = struct {
+                fn f(_: *anyopaque, _: u32) void {}
+            }.f,
+        };
+    };
+    var failing: Failing = .{};
+    const b = try client.newBinding();
+    defer client.unbind(b);
+    try client.bind(b, block, .{ .ctx = &failing, .vtable = &Failing.vtable });
+
+    // One resync for a fresh snapshot, then the binding lets go.
+    for (0..1000) |_| {
+        client.lock.lockUncancelable(testing.io);
+        const done = b.sink == null;
+        client.lock.unlock(testing.io);
+        if (done) break;
+        try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
+    } else return error.Timeout;
+    try std.Io.sleep(testing.io, .fromMilliseconds(100), .awake);
+    try testing.expectEqual(2, failing.loads.load(.monotonic));
+}

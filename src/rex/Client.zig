@@ -53,7 +53,8 @@ on_event: ?EventFn = null,
 event_userdata: ?*anyopaque = null,
 
 /// Held by the reader while it feeds a bound terminal, so that unbinding
-/// can wait until the terminal is no longer fed.
+/// can wait until the terminal is no longer fed. A terminal never waits
+/// for the app while fed, so the app's thread may wait for this.
 feed_lock: std.Io.Mutex = .init,
 
 const Pending = struct {
@@ -213,6 +214,9 @@ pub const Binding = struct {
     stream: ?u32 = null,
     /// The id of an unanswered `block.subscribe`.
     sub_id: ?i64 = null,
+    /// It resubscribed after a frame failed to apply, and no snapshot has
+    /// loaded since.
+    resynced: bool = false,
 
     /// Input for the program, already encoded.
     pub fn write(b: *Binding, bytes: []const u8) void {
@@ -288,6 +292,7 @@ pub fn bind(self: *Client, b: *Binding, block: []const u8, sink: Feed.Sink) !voi
     // Nothing feeds an unbound binding.
     b.feed.deinit(self.alloc);
     b.feed = .{};
+    b.resynced = false;
 
     self.lock.lockUncancelable(self.io);
     defer self.lock.unlock(self.io);
@@ -373,6 +378,11 @@ fn handleJson(self: *Client, payload: []u8) void {
             self.subscribed(b, msg.get("result"));
             return;
         };
+        // A subscription whose binding was unbound or resubscribed since.
+        const result = msg.get("result") orelse return;
+        if (result != .object) return;
+        const stream = result.object.get("stream") orelse return;
+        if (stream == .integer) _ = self.sendLocked("block.unsubscribe", .{ .stream = stream.integer }) catch {};
         return;
     }
 
@@ -444,14 +454,22 @@ fn handleData(self: *Client, t: protocol.FrameType, payload: []const u8) void {
         log.warn("resyncing block {s} after {t}", .{ b.block, err });
         break :ok false;
     };
+    if (ok and b.feed.loaded) b.resynced = false;
     self.feed_lock.unlock(self.io);
     if (ok) return;
 
-    // Start over from a snapshot.
     self.lock.lockUncancelable(self.io);
     defer self.lock.unlock(self.io);
     if (b.stream != stream) return;
     _ = self.sendLocked("block.unsubscribe", .{ .stream = stream }) catch {};
+    if (b.resynced) {
+        log.warn("unbinding block {s}, which fails to load", .{b.block});
+        b.stream = null;
+        b.sink = null;
+        return;
+    }
+    // Start over from a snapshot.
+    b.resynced = true;
     b.feed.loaded = false;
     self.subscribeLocked(b);
 }
