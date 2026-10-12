@@ -128,6 +128,11 @@ pub fn blend(fg: RGB, bg: RGB, alpha: u8) RGB {
     };
 }
 
+/// Braille Patterns, which TUI graphs (btop) draw with; ACC keeps their colour.
+pub fn isGraph(cp: u21) bool {
+    return cp >= 0x2800 and cp <= 0x28FF;
+}
+
 /// WCAG contrast ratio between two colours.
 pub fn contrast(a: RGB, b: RGB) f32 {
     return ratio(luminance(a), luminance(b));
@@ -301,6 +306,15 @@ test "rex acc: faint text reaches the target after blending" {
     try testing.expect(contrast(blended, light_bg) < target);
     const out = acc.get(blended, light_bg);
     try testing.expect(contrast(out, light_bg) >= target);
+}
+
+test "rex acc: braille graph glyphs are skipped" {
+    try testing.expect(isGraph(0x2800));
+    try testing.expect(isGraph(0x28FF));
+    try testing.expect(isGraph(0x28C4));
+    try testing.expect(!isGraph(0x27FF));
+    try testing.expect(!isGraph(0x2900));
+    try testing.expect(!isGraph('a'));
 }
 
 test "rex acc: lightens on a dark bg" {

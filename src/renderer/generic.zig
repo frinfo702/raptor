@@ -3201,7 +3201,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // own background; graphics glyphs keep their colors.
                 // Faint text is blended before correcting and then drawn
                 // opaque, so the dimmed result still meets the target.
-                const acc_on = self.acc_enabled and !noMinContrast(cell.codepoint());
+                const acc_on = self.acc_enabled and !noMinContrast(cell.codepoint()) and !rex_acc.isGraph(cell.codepoint());
                 const cell_bg = bg orelse state.colors.background;
                 const glyph_fg = if (acc_on) self.accText(fg, cell_bg, style.flags.faint) else fg;
 
