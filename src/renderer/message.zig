@@ -64,6 +64,9 @@ pub const Message = union(enum) {
     /// Activate or deactivate the inspector.
     inspector: bool,
 
+    /// Flip Raptor's contrast correction (toggle_contrast_correction).
+    toggle_contrast_correction,
+
     /// The macOS display ID has changed for the window.
     macos_display_id: u32,
 
