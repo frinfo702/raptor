@@ -108,7 +108,7 @@ expect_status 3 "$RAP" close -s demo -b 2
 
 # Memory stats list every block, in text and as JSON.
 "$RAP" server stats | grep -q '^BLOCK ' || fail "server stats"
-"$RAP" --json server stats | grep -q '"memory_usage":{"rows":' || fail "server stats --json"
+"$RAP" --json server stats | grep -q '"rows":[0-9]*,"primary":{"pages":{"pages":' || fail "server stats --json"
 
 # Keys reach the program.
 "$RAP" send-key -s demo e c h o Space k e y s Enter

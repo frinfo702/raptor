@@ -660,14 +660,27 @@ const Ctx = struct {
                 "BLOCK", "SESSION", "ROWS", "PAGES", "COMPRESSED", "RESIDENT KiB", "COMPRESSED KiB",
             });
             for (r.object.get("blocks").?.array.items) |b| {
-                const m = b.object.get("memory_usage").?;
+                // Both screens together; images count as resident.
+                var pages: i64 = 0;
+                var compressed: i64 = 0;
+                var resident: i64 = 0;
+                var encoded: i64 = 0;
+                for ([_][]const u8{ "primary", "alternate" }) |key| {
+                    const screen = b.object.get(key) orelse continue;
+                    if (screen != .object) continue;
+                    const p = screen.object.get("pages").?;
+                    pages += int(p, "pages");
+                    compressed += int(p, "compressed_pages");
+                    resident += int(p, "resident_bytes") + int(screen, "image_bytes");
+                    encoded += int(p, "compressed_bytes");
+                }
                 const id = str(b, "id");
                 try self.out.print("{s:<12} {s:<16} {d:>8} {d:>6} {d:>10} {d:>13.1} {d:>15.1}\n", .{
-                    id[id.len - 12 ..],               str(b, "session"),
+                    id[id.len - 12 ..],   str(b, "session"),
                     // Unsigned: Zig prints a "+" on signed ints formatted with a width.
-                    @abs(int(m, "rows")),             @abs(int(m, "pages")),
-                    @abs(int(m, "compressed_pages")), kib(int(m, "resident_bytes")),
-                    kib(int(m, "compressed_bytes")),
+                    @abs(int(b, "rows")), @abs(pages),
+                    @abs(compressed),     kib(resident),
+                    kib(encoded),
                 });
             }
             return .ok;

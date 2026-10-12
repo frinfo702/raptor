@@ -15,7 +15,9 @@
 #   filled  additional memory per 80x24 block that printed 10,000 numbered
 #           72-column prose lines, after the server's idle compression
 #   client  additional memory per client connection subscribed to 50
-#           filled blocks, after one client has already subscribed
+#           filled blocks, after one client has already subscribed; that
+#           first subscriber's cost (the blocks' shared replay rings and the
+#           snapshot-decode high-water mark) is reported on its own line
 #
 # Set RAP_BENCH_EMPTY, RAP_BENCH_FILLED, and RAP_BENCH_CLIENTS to change how
 # many blocks or clients each workload averages over.
@@ -228,12 +230,16 @@ def main():
         srv = start_with_session(tmp, "client")
         blocks = add_blocks(srv, 50, FILLED)
         wait_output(srv, blocks, filled_seq)
-        # The first subscriber pays once for every block's replay ring and
-        # for the allocator's high-water mark from decoding compressed pages
-        # into snapshots, so it subscribes after compression, like the rest.
-        srv.settle()
+        # The first subscriber pays once for every block's replay ring, which
+        # belongs to the block and is shared by all clients, and for the
+        # allocator's high-water mark from decoding compressed pages into
+        # snapshots. Report that on its own line; the per-client target is
+        # the marginal cost of each client after it.
+        f_idle = srv.settle()
         warm = subscribe_all(srv, blocks)
         f0 = srv.settle()
+        results.append(("First subscriber, 50 filled blocks (rings, snapshot decode)",
+                        f0 - f_idle, "KiB", None))
         clients = [subscribe_all(srv, blocks) for _ in range(N_CLIENTS)]
         results.append(("Per client, 50 filled blocks (avg of %d)" % N_CLIENTS,
                         (srv.settle() - f0) / N_CLIENTS, "KiB", 150 * KIB))
@@ -248,6 +254,9 @@ def main():
     failed = False
     for name, value, unit, target in results:
         div = KIB * KIB if unit == "MiB" else KIB
+        if target is None:
+            print("| %s | %.1f %s | (reported) | |" % (name, value / div, unit))
+            continue
         ok = value <= target
         failed |= not ok
         print("| %s | %.1f %s | <= %.1f %s | %s |" % (

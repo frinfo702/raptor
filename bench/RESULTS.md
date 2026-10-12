@@ -23,6 +23,15 @@ Five runs:
 
 All four targets are met.
 
+The per-client target is judged on the marginal cost of each client after
+the first one. The first subscriber's cost is reported on its own line
+(see the note on clients). Three later runs, with that line added:
+
+| Workload | Run 6 | Run 7 | Run 8 |
+|---|---|---|---|
+| First subscriber, 50 filled blocks (rings, snapshot decode) | 2,512.0 KiB | 2,528.0 KiB | 2,576.0 KiB |
+| Per client, 50 filled blocks (avg of 10) | 72.0 KiB | 72.0 KiB | 116.8 KiB |
+
 ## Notes
 
 - **Filled blocks.** The server compresses a block's cold scrollback once
@@ -40,12 +49,19 @@ All four targets are met.
   resident page `VM_INHERIT_NONE` before it forks
   (`Block.hidePagesFromChildren`), which brings them back to 1,934 KiB.
   The Ghostty app forks each new surface the same way.
-- **Clients.** Each additional client costs about 30 KiB: its 16 KiB read
+- **Clients.** Each additional client costs about 30 KiB in runs 2 to 5
+  (runs 6 to 8 measured 72 to 117 KiB, with malloc high-water noise on
+  top): its 16 KiB read
   buffer, 50 stream records, and its outbox. The first subscriber of a
   block also pays once for the block's replay ring, and decoding compressed
   pages for its snapshots raises the allocator's high-water mark once. The
-  benchmark has one client subscribe before it measures, so that cost
-  isn't counted per client. Snapshots are encoded in an arena on the page
+  ring is per-block state shared by all clients (design report 6.3), so,
+  following Rex's "additional memory per client connection", the
+  benchmark has one client subscribe before it starts the per-client
+  baseline, and reports that first subscriber's cost separately: about
+  2.5 MiB for 50 blocks, of which 800 KiB are the 50 16 KiB rings.
+  Counted as one of 11 clients, it would put the average near 300 KiB,
+  over the 150 KiB target. Snapshots are encoded in an arena on the page
   allocator, so their decode buffers go back to the OS rather than to
   malloc. Before that change, runs averaged 170 to 210 KiB per client,
   from malloc high-water jumps of about 1 MiB. A smaller jump still shows

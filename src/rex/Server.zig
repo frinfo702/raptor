@@ -1364,11 +1364,17 @@ fn serverStats(self: *Server, req: *Request, w: *Stringify) Error!void {
     try w.write(physFootprint());
     try w.objectField("blocks");
     try w.beginArray();
-    for (self.sessions.items) |s| for (try sessionPanes(s, req.arena)) |pane| try w.write(.{
-        .id = prefixed("block", &pane.id),
-        .session = s.label,
-        .memory_usage = pane.block.memoryUsage(),
-    });
+    for (self.sessions.items) |s| for (try sessionPanes(s, req.arena)) |pane| {
+        const primary = pane.block.term.screens.get(.primary).?;
+        const alternate = pane.block.term.screens.get(.alternate);
+        try w.write(.{
+            .id = prefixed("block", &pane.id),
+            .session = s.label,
+            .rows = primary.pages.total_rows,
+            .primary = primary.memoryUsage(),
+            .alternate = if (alternate) |a| a.memoryUsage() else null,
+        });
+    };
     try w.endArray();
     try w.endObject();
 }
@@ -1899,7 +1905,7 @@ test "rex Server: sessions over the socket" {
         defer alloc.free(stats);
         const parsed = try std.json.parseFromSlice(std.json.Value, alloc, stats, .{});
         defer parsed.deinit();
-        const usage = parsed.value.object.get("result").?.object.get("blocks").?.array.items[0].object.get("memory_usage").?;
+        const usage = parsed.value.object.get("result").?.object.get("blocks").?.array.items[0].object.get("primary").?.object.get("pages").?;
         if (usage.object.get("compressed_pages").?.integer > 0) break;
         if (tries == 1000) return error.TestUnexpectedResult;
         try std.Io.sleep(testing.io, .fromMilliseconds(10), .awake);
