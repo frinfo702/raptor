@@ -505,6 +505,20 @@ typedef enum {
   GHOSTTY_SURFACE_CONTEXT_SPLIT = 2,
 } ghostty_surface_context_e;
 
+typedef enum {
+  GHOSTTY_SURFACE_IO_EXEC = 0,
+  GHOSTTY_SURFACE_IO_EXTERNAL = 1,
+} ghostty_surface_io_mode_e;
+
+// External surface I/O callbacks. They run on the surface's I/O thread.
+typedef void (*ghostty_surface_io_write_cb)(void*, const uint8_t*, uintptr_t);
+typedef void (*ghostty_surface_io_resize_cb)(void*,
+                                             uint16_t,
+                                             uint16_t,
+                                             uint32_t,
+                                             uint32_t);
+typedef void (*ghostty_surface_io_focus_cb)(void*, bool);
+
 typedef struct {
   ghostty_platform_e platform_tag;
   ghostty_platform_u platform;
@@ -518,6 +532,11 @@ typedef struct {
   const char* initial_input;
   bool wait_after_command;
   ghostty_surface_context_e context;
+  ghostty_surface_io_mode_e io_mode;
+  void* io_userdata;
+  ghostty_surface_io_write_cb io_write_cb;
+  ghostty_surface_io_resize_cb io_resize_cb;
+  ghostty_surface_io_focus_cb io_focus_cb;
 } ghostty_surface_config_s;
 
 typedef struct {
@@ -1184,6 +1203,14 @@ GHOSTTY_API ghostty_surface_config_s ghostty_surface_inherited_config(ghostty_su
 GHOSTTY_API void ghostty_surface_update_config(ghostty_surface_t, ghostty_config_t);
 GHOSTTY_API bool ghostty_surface_needs_confirm_quit(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_process_exited(ghostty_surface_t);
+GHOSTTY_API void ghostty_surface_process_output(ghostty_surface_t,
+                                                const uint8_t*,
+                                                uintptr_t);
+GHOSTTY_API bool ghostty_surface_load_snapshot(ghostty_surface_t,
+                                               const uint8_t*,
+                                               uintptr_t);
+GHOSTTY_API void ghostty_surface_set_grid(ghostty_surface_t, uint16_t, uint16_t);
+GHOSTTY_API void ghostty_surface_child_exited(ghostty_surface_t, uint32_t);
 GHOSTTY_API void ghostty_surface_refresh(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_draw(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_content_scale(ghostty_surface_t, double, double);

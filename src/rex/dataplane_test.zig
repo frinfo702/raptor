@@ -294,11 +294,10 @@ test "rex data plane: a stalled client neither delays others nor stays stale" {
 
     var a = try Conn.open(h.path);
     defer a.close();
-    // Several times the 1 MiB outbox cap, all on one line: scrollback
-    // pruning drops whole pages, and a terminal restored from a snapshot
-    // doesn't share the server's page boundaries.
+    // Several times the 1 MiB outbox cap, in enough lines to prune
+    // scrollback long after A's snapshot, which comes before the output.
     const block = try createSession(&a,
-        \\read x; yes 'output that a stalled client cannot keep up with' | head -n 80000 | tr '\n' '\r'; echo; echo done; exec cat
+        \\read x; yes 'output that a stalled client cannot keep up with' | head -n 80000; echo done; exec cat
     );
     defer alloc.free(block);
 
@@ -325,12 +324,12 @@ test "rex data plane: a stalled client neither delays others nor stays stale" {
         const elapsed = std.Io.Clock.awake.now(testing.io).toMilliseconds() - start;
         try testing.expect(elapsed < 50);
     }
-    const f = try format(&a, block, false);
-    alloc.free(f.text);
-    try a.syncTo(&ma, f.seq);
+    // The loop above stops at the tty echo; wait for cat's copies too.
+    const seq = try waitText(&a, block, "ping\nping\nping\nping\nping\nping\nping\nping\nping\nping");
+    try a.syncTo(&ma, seq);
 
     // B catches up from a fresh snapshot once it reads again.
     while (mb.snapshots < 2) if (try b.readOne()) |p| alloc.free(p);
-    try b.syncTo(&mb, f.seq);
+    try b.syncTo(&mb, seq);
     try expectMirrors(&a, block, &.{ &ma, &mb });
 }

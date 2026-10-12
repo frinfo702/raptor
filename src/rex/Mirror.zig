@@ -9,7 +9,7 @@ const Mirror = @This();
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const terminal = @import("../terminal/main.zig");
-const Block = @import("Block.zig");
+const restore = @import("restore.zig");
 const protocol = @import("protocol.zig");
 
 alloc: Allocator,
@@ -28,7 +28,7 @@ pub const Error = error{
     /// A frame doesn't continue from `seq`, or came before any snapshot.
     OutOfSync,
     BadFrame,
-} || terminal.snapshot.DecodeError || terminal.Terminal.ResizeError;
+} || terminal.snapshot.DecodeError || terminal.Terminal.ResizeError || Allocator.Error;
 
 pub fn init(alloc: Allocator, io: std.Io) Mirror {
     return .{ .alloc = alloc, .io = io };
@@ -73,9 +73,7 @@ pub fn apply(self: *Mirror, t: protocol.FrameType, payload: []const u8) Error!vo
 
 fn load(self: *Mirror, base_seq: u64) Error!void {
     var reader: std.Io.Reader = .fixed(self.snap.items);
-    var decoded = try terminal.snapshot.decode(self.alloc, self.io, &reader, .{
-        .max_continuation_bytes = Block.max_continuation_bytes,
-    });
+    var decoded = try restore.decode(self.alloc, self.io, &reader);
     defer decoded.deinit(self.alloc);
     self.unload();
     self.term = decoded.toOwned();

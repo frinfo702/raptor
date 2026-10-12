@@ -6,6 +6,7 @@ pub const dataplane = @import("dataplane.zig");
 pub const ids = @import("ids.zig");
 pub const layout = @import("layout.zig");
 pub const protocol = @import("protocol.zig");
+pub const restore = @import("restore.zig");
 
 test {
     _ = Block;
@@ -16,4 +17,5 @@ test {
     _ = ids;
     _ = layout;
     _ = protocol;
+    _ = restore;
 }

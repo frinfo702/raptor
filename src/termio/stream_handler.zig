@@ -59,6 +59,10 @@ pub const StreamHandler = struct {
     /// and XTCHECKSUM may change how it's calculated.
     xt_checksum_report: bool,
 
+    /// Drop replies to the program, for a terminal whose program is
+    /// answered elsewhere (termio.External).
+    suppress_replies: bool = false,
+
     //---------------------------------------------------------------
     // Internal state
 
@@ -147,6 +151,17 @@ pub const StreamHandler = struct {
     }
 
     inline fn messageWriter(self: *StreamHandler, msg: termio.Message) void {
+        if (self.suppress_replies) switch (msg) {
+            .write_small,
+            .write_stable,
+            .write_alloc,
+            .size_report,
+            .color_scheme_report,
+            .visibility_report,
+            .focused,
+            => return msg.deinit(),
+            else => {},
+        };
         self.termio_mailbox.send(msg, self.renderer_state.mutex);
         self.termio_messaged = true;
     }
