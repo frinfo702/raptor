@@ -18,6 +18,7 @@ const renderer = @import("../renderer.zig");
 const terminal = @import("../terminal/main.zig");
 const termio = @import("../termio.zig");
 const restore = @import("../rex/restore.zig");
+const Feed = @import("../rex/Feed.zig");
 const ProcessInfo = @import("../pty.zig").ProcessInfo;
 
 /// Bytes for the program: keys, text, mouse and focus reports.
@@ -176,9 +177,50 @@ pub fn setGrid(io: *termio.Termio, cols: u16, rows: u16) !void {
     try io.renderer_wakeup.notify();
 }
 
+/// The terminal as the target of a rap client's binding (rex/Client.zig),
+/// which feeds it on its reader thread.
+pub fn sink(io: *termio.Termio) Feed.Sink {
+    return .{ .ctx = io, .vtable = &sink_vtable };
+}
+
+const sink_vtable: Feed.Sink.VTable = .{
+    .load = struct {
+        fn f(ctx: *anyopaque, bytes: []const u8) anyerror!void {
+            return loadSnapshot(sinkTermio(ctx), bytes);
+        }
+    }.f,
+    .output = struct {
+        fn f(ctx: *anyopaque, bytes: []const u8) void {
+            const io = sinkTermio(ctx);
+            io.processOutput(bytes);
+            io.renderer_state.yieldToDemand(global.io());
+        }
+    }.f,
+    .grid = struct {
+        fn f(ctx: *anyopaque, cols: u16, rows: u16) anyerror!void {
+            return setGrid(sinkTermio(ctx), cols, rows);
+        }
+    }.f,
+    .exited = struct {
+        fn f(ctx: *anyopaque, code: u32) void {
+            // As termio.Exec reports a local child's exit. The remote side
+            // knows how long the program ran; never treat the exit as an
+            // abnormal, too-quick one.
+            _ = sinkTermio(ctx).surface_mailbox.push(.{ .child_exited = .{
+                .exit_code = code,
+                .runtime_ms = std.math.maxInt(u64),
+            } }, .{ .forever = {} });
+        }
+    }.f,
+};
+
+fn sinkTermio(ctx: *anyopaque) *termio.Termio {
+    return @ptrCast(@alignCast(ctx));
+}
+
 /// A Termio with this backend and its thread, set up the way CoreSurface
 /// sets them up, without a renderer or an app. It records the callbacks.
-const TestSurface = struct {
+pub const TestSurface = struct {
     const testing = std.testing;
     const configpkg = @import("../config.zig");
     const xev = global.xev;
@@ -197,13 +239,23 @@ const TestSurface = struct {
     written: std.ArrayList(u8) = .empty,
     resizes: std.ArrayList([2]u16) = .empty,
 
-    const size: renderer.Size = .{
+    pub const size: renderer.Size = .{
         .screen = .{ .width = 800, .height = 480 },
         .cell = .{ .width = 10, .height = 20 },
         .padding = .{},
     };
 
-    fn init(self: *TestSurface) !void {
+    pub fn init(self: *TestSurface) !void {
+        try self.initWith(.{
+            .userdata = self,
+            .write_cb = onWrite,
+            .resize_cb = onResize,
+        });
+    }
+
+    /// Init with other callbacks, which leaves `written` and `resizes`
+    /// empty.
+    pub fn initWith(self: *TestSurface, backend: External) !void {
         const alloc = testing.allocator;
         self.* = .{
             .config = try .default(alloc),
@@ -219,11 +271,7 @@ const TestSurface = struct {
             .size = size,
             .full_config = &self.config,
             .config = try .init(alloc, &self.config),
-            .backend = .{ .external = .{
-                .userdata = self,
-                .write_cb = onWrite,
-                .resize_cb = onResize,
-            } },
+            .backend = .{ .external = backend },
             .mailbox = try .initSPSC(alloc),
             .renderer_state = &self.renderer_state,
             .renderer_wakeup = self.renderer_wakeup,
@@ -234,7 +282,7 @@ const TestSurface = struct {
         self.thr = try .spawn(.{}, termio.Thread.threadMain, .{ &self.thread, &self.io });
     }
 
-    fn deinit(self: *TestSurface) void {
+    pub fn deinit(self: *TestSurface) void {
         const alloc = testing.allocator;
         self.thread.stop.notify() catch unreachable;
         self.thr.join();
@@ -262,7 +310,7 @@ const TestSurface = struct {
     }
 
     /// Send the user's input the way CoreSurface does.
-    fn write(self: *TestSurface, data: []const u8) !void {
+    pub fn write(self: *TestSurface, data: []const u8) !void {
         self.io.queueMessage(try termio.Message.writeReq(testing.allocator, data), .unlocked);
     }
 
@@ -280,7 +328,7 @@ const TestSurface = struct {
         return error.Timeout;
     }
 
-    fn plainAll(self: *TestSurface) ![]const u8 {
+    pub fn plainAll(self: *TestSurface) ![]const u8 {
         self.mutex.lockUncancelable(testing.io);
         defer self.mutex.unlock(testing.io);
         return self.io.terminal.screens.active.dumpStringAlloc(testing.allocator, .{ .screen = .{} });

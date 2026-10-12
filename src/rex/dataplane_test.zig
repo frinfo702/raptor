@@ -12,7 +12,7 @@ const protocol = @import("protocol.zig");
 const alloc = testing.allocator;
 
 /// A server running on its own thread.
-const Harness = struct {
+pub const Harness = struct {
     path: [:0]u8,
     server: *Server,
     thread: std.Thread,
@@ -20,7 +20,7 @@ const Harness = struct {
 
     var count: usize = 0;
 
-    fn start(self: *Harness) !void {
+    pub fn start(self: *Harness) !void {
         // A client that goes away mid-write must not kill the test.
         var act: posix.Sigaction = .{ .handler = .{ .handler = posix.SIG.IGN }, .mask = posix.sigemptyset(), .flags = 0 };
         posix.sigaction(.PIPE, &act, null);
@@ -40,7 +40,7 @@ const Harness = struct {
         }).run, .{self.server});
     }
 
-    fn stop(self: *Harness) void {
+    pub fn stop(self: *Harness) void {
         if (Conn.open(self.path)) |conn_| {
             var conn = conn_;
             defer conn.close();
@@ -145,8 +145,8 @@ const Conn = struct {
 
     /// Read until the mirror has applied the block's output through `seq`.
     fn syncTo(self: *Conn, m: *const Mirror, seq: u64) !void {
-        while (m.term == null or m.seq < seq) if (try self.readOne()) |p| alloc.free(p);
-        try testing.expectEqual(seq, m.seq);
+        while (m.term == null or m.feed.seq < seq) if (try self.readOne()) |p| alloc.free(p);
+        try testing.expectEqual(seq, m.feed.seq);
     }
 };
 
@@ -181,7 +181,7 @@ fn expectMirrors(conn: *Conn, block: []const u8, mirrors: []const *Mirror) !void
     const f = try format(conn, block, true);
     defer alloc.free(f.text);
     for (mirrors) |m| {
-        try testing.expectEqual(f.seq, m.seq);
+        try testing.expectEqual(f.seq, m.feed.seq);
         const text = try m.plainAll(alloc);
         defer alloc.free(text);
         try testing.expectEqualStrings(f.text, text);
@@ -231,8 +231,8 @@ test "rex data plane: mirrors, reconnect, reset, and owner resize" {
     var mb: Mirror = .init(alloc, testing.io);
     defer mb.deinit();
     const sb = try b.subscribe(&mb, block, null);
-    try b.syncTo(&mb, ma.seq);
-    try testing.expect(mb.seq > 5000 * line.len);
+    try b.syncTo(&mb, ma.feed.seq);
+    try testing.expect(mb.feed.seq > 5000 * line.len);
 
     try a.send(.in, protocol.In{ .stream = sa }, "go\n");
     const done = try waitText(&a, block, "10000 the quick");
@@ -242,8 +242,8 @@ test "rex data plane: mirrors, reconnect, reset, and owner resize" {
     const all = try ma.plainAll(alloc);
     defer alloc.free(all);
     try testing.expect(std.mem.count(u8, all, "\n") >= 10_000);
-    try testing.expectEqual(1, ma.snapshots);
-    try testing.expectEqual(1, mb.snapshots);
+    try testing.expectEqual(1, ma.feed.snapshots);
+    try testing.expectEqual(1, mb.feed.snapshots);
 
     // A drops its connection and comes back while the output it missed
     // is still in the ring: it gets only that output, no snapshot.
@@ -253,18 +253,18 @@ test "rex data plane: mirrors, reconnect, reset, and owner resize" {
     const echoed = try waitText(&b, block, "hello\nhello");
     var a2 = try Conn.open(h.path);
     defer a2.close();
-    const sa2 = try a2.subscribe(&ma, block, ma.seq);
+    const sa2 = try a2.subscribe(&ma, block, ma.feed.seq);
     try a2.syncTo(&ma, echoed);
     try b.syncTo(&mb, echoed);
     try testing.expect(a2.seen.items.len > 0);
     try testing.expectEqual(0, countSnaps(&a2));
-    try testing.expectEqual(1, ma.snapshots);
+    try testing.expectEqual(1, ma.feed.snapshots);
     try expectMirrors(&a2, block, &.{ &ma, &mb });
 
     // A reset resends every stream as a snapshot.
     (try a2.call("block.method", .{ .block = block, .method = "reset" })).deinit();
-    while (ma.snapshots < 2) if (try a2.readOne()) |p| alloc.free(p);
-    while (mb.snapshots < 2) if (try b.readOne()) |p| alloc.free(p);
+    while (ma.feed.snapshots < 2) if (try a2.readOne()) |p| alloc.free(p);
+    while (mb.feed.snapshots < 2) if (try b.readOne()) |p| alloc.free(p);
     try expectMirrors(&a2, block, &.{ &ma, &mb });
 
     // B sent input last, so it owns the size and A's request waits until
@@ -329,7 +329,7 @@ test "rex data plane: a stalled client neither delays others nor stays stale" {
     try a.syncTo(&ma, seq);
 
     // B catches up from a fresh snapshot once it reads again.
-    while (mb.snapshots < 2) if (try b.readOne()) |p| alloc.free(p);
+    while (mb.feed.snapshots < 2) if (try b.readOne()) |p| alloc.free(p);
     try b.syncTo(&mb, seq);
     try expectMirrors(&a, block, &.{ &ma, &mb });
 }

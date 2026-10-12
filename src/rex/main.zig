@@ -1,5 +1,7 @@
 //! Rex: the persistent terminal server and its clients.
 pub const Block = @import("Block.zig");
+pub const Client = @import("Client.zig");
+pub const Feed = @import("Feed.zig");
 pub const Mirror = @import("Mirror.zig");
 pub const Server = @import("Server.zig");
 pub const dataplane = @import("dataplane.zig");
@@ -10,6 +12,9 @@ pub const restore = @import("restore.zig");
 
 test {
     _ = Block;
+    _ = Client;
+    _ = @import("client_test.zig");
+    _ = Feed;
     _ = Mirror;
     _ = dataplane;
     _ = @import("dataplane_test.zig");

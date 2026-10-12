@@ -41,6 +41,9 @@ comptime {
     // Any apprt-specific C API, mainly libghostty for apprt.embedded.
     if (@hasDecl(apprt.runtime, "CAPI")) _ = apprt.runtime.CAPI;
 
+    // The rap client (include/raptor.h), which binds embedded surfaces.
+    if (apprt.runtime == apprt.embedded) _ = @import("rex/capi.zig");
+
     // Our benchmark API. We probably want to gate this on a build
     // config in the future but for now we always just export it.
     _ = @import("benchmark/main.zig").CApi;
