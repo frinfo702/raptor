@@ -515,7 +515,8 @@ pub const Surface = struct {
         context: apprt.surface.NewSurfaceContext = .window,
 
         /// How the terminal gets its I/O. With `external`, the command,
-        /// working directory, env vars and initial input are unused, and
+        /// working directory, env vars, initial input and the `input`
+        /// config are unused, and
         /// the callbacks below get the user's input, view size and focus.
         io_mode: IoMode = .exec,
         io_userdata: ?*anyopaque = null,
@@ -597,13 +598,13 @@ pub const Surface = struct {
         }
 
         // If we have a command from the options then we set it.
-        if (opts.command) |c_command| {
+        if (opts.io_mode == .exec) if (opts.command) |c_command| {
             const cmd = std.mem.sliceTo(c_command, 0);
             if (cmd.len > 0) {
                 config.command = .{ .shell = cmd };
                 config.@"wait-after-command" = true;
             }
-        }
+        };
 
         // Apply any environment variables that were requested.
         if (opts.env_var_count > 0) {

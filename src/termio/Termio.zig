@@ -328,10 +328,10 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .suppress_replies = opts.backend == .external,
     };
 
-    const thread_enter_state = try ThreadEnterState.create(
-        alloc,
-        opts.full_config,
-    );
+    const thread_enter_state = if (opts.backend == .external)
+        null
+    else
+        try ThreadEnterState.create(alloc, opts.full_config);
 
     self.* = .{
         .alloc = alloc,

@@ -26,9 +26,40 @@ pub fn decode(
     const t = &decoded.terminal.?;
     for ([_]terminal.ScreenSet.Key{ .primary, .alternate }) |key| {
         const screen = t.screens.get(key) orelse continue;
-        if (try growLastPage(&screen.pages)) screen.cursorReload();
+        if (!try growLastPage(&screen.pages)) continue;
+        if (screen.cursor.page_pin.node == screen.pages.pages.last.?) {
+            try readdCursorRefs(screen);
+        }
+        screen.cursorReload();
     }
     return decoded;
+}
+
+/// The cursor's style and hyperlink each hold a ref in the cursor's page
+/// that `cloneFrom` doesn't copy, so add them to the new page the way
+/// `Screen.increaseCapacity` does.
+fn readdCursorRefs(screen: *terminal.Screen) terminal.PageList.IncreaseCapacityError!void {
+    const link = screen.cursor.hyperlink;
+    screen.cursor.hyperlink = null;
+    screen.cursor.hyperlink_id = 0;
+    defer if (link) |l| {
+        l.deinit(screen.alloc);
+        screen.alloc.destroy(l);
+    };
+
+    screen.cursor.style_id = 0;
+    try screen.manualStyleUpdate();
+
+    const l = link orelse return;
+    switch (l.id) {
+        .explicit => |id| try screen.startHyperlink(l.uri, id),
+        .implicit => |id| {
+            const next = screen.cursor.hyperlink_implicit_id;
+            defer screen.cursor.hyperlink_implicit_id = next;
+            screen.cursor.hyperlink_implicit_id = id;
+            try screen.startHyperlink(l.uri, null);
+        },
+    }
 }
 
 /// Replace the last page with one of standard capacity, as
@@ -104,4 +135,44 @@ test "rex restore: a pruned snapshot keeps pruning like its source" {
     defer alloc.free(got);
     try testing.expect(!std.mem.startsWith(u8, want, "line 0\n"));
     try testing.expectEqualStrings(want, got);
+}
+
+test "rex restore: the cursor keeps its style and hyperlink" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var src: terminal.Terminal = try .init(testing.io, alloc, .{ .cols = 80, .rows = 24 });
+    defer src.deinit(alloc);
+    var src_vt = src.vtStream();
+    defer src_vt.deinit();
+    src_vt.nextSlice("\x1b[31m\x1b]8;;http://example.com\x1b\\hi");
+
+    var encoded: std.Io.Writer.Allocating = .init(alloc);
+    defer encoded.deinit();
+    try terminal.snapshot.encode(alloc, &encoded.writer, &src, .{ .continuation = .ground });
+    var reader: std.Io.Reader = .fixed(encoded.written());
+    var decoded = try decode(alloc, testing.io, &reader);
+    defer decoded.deinit(alloc);
+    var dst = decoded.toOwned();
+    defer dst.deinit(alloc);
+
+    const page = dst.screens.active.cursor.page_pin.node.page();
+    try testing.expect(page.capacity.rows > page.size.rows);
+
+    // The two cells and the cursor each hold a ref, as in the source.
+    for ([_]*terminal.Terminal{ &src, &dst }) |t| {
+        const cursor = &t.screens.active.cursor;
+        const p = cursor.page_pin.node.page();
+        try testing.expect(p.styles.get(p.memory, cursor.style_id).eql(cursor.style));
+        try testing.expectEqual(3, p.styles.refCount(p.memory, cursor.style_id));
+        try testing.expectEqual(3, p.hyperlink_set.refCount(p.memory, cursor.hyperlink_id));
+    }
+
+    var dst_vt = dst.vtStream();
+    defer dst_vt.deinit();
+    dst_vt.nextSlice("!\x1b[0m\x1b]8;;\x1b\\");
+    const cell = dst.screens.active.pages.getCell(.{ .active = .{ .x = 2 } }).?;
+    const cell_page = cell.node.page();
+    const style = cell_page.styles.get(cell_page.memory, cell.cell.style_id);
+    try testing.expect(style.eql(.{ .fg_color = .{ .palette = 1 } }));
 }
