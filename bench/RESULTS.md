@@ -14,12 +14,12 @@ behind Rex's published charts. Each workload starts a fresh server.
 
 Five runs:
 
-| Workload | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Target | Rex |
-|---|---|---|---|---|---|---|---|
-| Server start, one session | 3.3 MiB | 3.3 MiB | 3.3 MiB | 3.3 MiB | 3.3 MiB | <= 12 MiB | 10.6 MiB |
-| Per empty block (avg of 100) | 34.2 KiB | 34.1 KiB | 34.6 KiB | 33.9 KiB | 34.6 KiB | <= 100 KiB | 68 KiB |
-| Per block with 10k lines, idle (avg of 20) | 1,936.8 KiB | 1,934.4 KiB | 1,933.6 KiB | 1,934.4 KiB | 1,937.6 KiB | <= 2,252.8 KiB (2.2 MiB) | 407 KiB |
-| Per client, 50 filled blocks (avg of 10) | 80.0 KiB | 28.8 KiB | 33.6 KiB | 28.8 KiB | 30.4 KiB | <= 150 KiB | 85 KiB |
+| Workload                                   | Run 1       | Run 2       | Run 3       | Run 4       | Run 5       | Target                   | Rex      |
+| ------------------------------------------ | ----------- | ----------- | ----------- | ----------- | ----------- | ------------------------ | -------- |
+| Server start, one session                  | 3.3 MiB     | 3.3 MiB     | 3.3 MiB     | 3.3 MiB     | 3.3 MiB     | <= 12 MiB                | 10.6 MiB |
+| Per empty block (avg of 100)               | 34.2 KiB    | 34.1 KiB    | 34.6 KiB    | 33.9 KiB    | 34.6 KiB    | <= 100 KiB               | 68 KiB   |
+| Per block with 10k lines, idle (avg of 20) | 1,936.8 KiB | 1,934.4 KiB | 1,933.6 KiB | 1,934.4 KiB | 1,937.6 KiB | <= 2,252.8 KiB (2.2 MiB) | 407 KiB  |
+| Per client, 50 filled blocks (avg of 10)   | 80.0 KiB    | 28.8 KiB    | 33.6 KiB    | 28.8 KiB    | 30.4 KiB    | <= 150 KiB               | 85 KiB   |
 
 All four targets are met.
 
@@ -27,10 +27,10 @@ The per-client target is judged on the marginal cost of each client after
 the first one. The first subscriber's cost is reported on its own line
 (see the note on clients). Three later runs, with that line added:
 
-| Workload | Run 6 | Run 7 | Run 8 |
-|---|---|---|---|
+| Workload                                                    | Run 6       | Run 7       | Run 8       |
+| ----------------------------------------------------------- | ----------- | ----------- | ----------- |
 | First subscriber, 50 filled blocks (rings, snapshot decode) | 2,512.0 KiB | 2,528.0 KiB | 2,576.0 KiB |
-| Per client, 50 filled blocks (avg of 10) | 72.0 KiB | 72.0 KiB | 116.8 KiB |
+| Per client, 50 filled blocks (avg of 10)                    | 72.0 KiB    | 72.0 KiB    | 116.8 KiB   |
 
 ## Notes
 
