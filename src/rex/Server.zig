@@ -850,13 +850,13 @@ fn onBlockEvent(block: *Block, event: Block.Event) void {
 
 // Program status
 
-/// What clients see of a block's status.
+/// What clients see of a block's status: {state, kind, msg, progress,
+/// updated_at}, with `progress` the OSC 9;4 percentage if one was set.
 const StatusView = struct {
     state: []const u8,
     kind: ?[]const u8,
     msg: ?[]const u8,
     progress: ?u8,
-    source: ?[]const u8,
     updated_at: i64,
 };
 
@@ -867,7 +867,6 @@ fn statusView(pane: *const Pane) ?StatusView {
         .kind = s.kind,
         .msg = if (pane.status_msg.items.len > 0) pane.status_msg.items else null,
         .progress = s.progress,
-        .source = @tagName(s.source),
         .updated_at = s.updated_at,
     };
 }
@@ -882,7 +881,6 @@ fn setStatus(self: *Server, pane: *Pane, status: ?Status, msg: []const u8) void 
         .kind = null,
         .msg = null,
         .progress = null,
-        .source = null,
         .updated_at = self.wallMs(),
     };
     self.emit("program_status_changed", &pane.session_id, .{
@@ -891,7 +889,6 @@ fn setStatus(self: *Server, pane: *Pane, status: ?Status, msg: []const u8) void 
         .kind = view.kind,
         .msg = view.msg,
         .progress = view.progress,
-        .source = view.source,
         .updated_at = view.updated_at,
     });
 }
@@ -943,7 +940,8 @@ fn progressStatus(self: *Server, pane: *Pane, p: @FieldType(Block.Event, "progre
 fn titleStatus(self: *Server, pane: *Pane, title: []const u8) void {
     const t = splitTitle(title);
     if (t.spinner) return self.inferStatus(pane, .title, "working", null, t.text);
-    if (working(pane)) self.inferStatus(pane, .title, "done", null, t.text);
+    const s = pane.status orelse return;
+    if (s.source == .title and working(pane)) self.inferStatus(pane, .title, "done", null, t.text);
 }
 
 /// A title without its leading symbol, such as Claude Code's "✳ " or a
@@ -1361,9 +1359,9 @@ const Request = struct {
     }
 
     /// A positive integer, at most `max`.
-    fn count(self: *const Request, key: []const u8, default: usize, max: usize) usize {
+    fn count(self: *Request, key: []const u8, default: usize, max: usize) Error!usize {
         const v = self.get(key) orelse return default;
-        if (v != .integer or v.integer < 1) return default;
+        if (v != .integer or v.integer < 1) return self.fail(error.Usage, "{s} must be a positive integer", .{key});
         return @min(@as(usize, @intCast(v.integer)), max);
     }
 
@@ -2007,12 +2005,14 @@ fn methodProcess(pane: *Pane, req: *Request, w: *Stringify) Error!void {
 /// paths that fuzzily match it. At most `limit` entries (default 5000).
 fn methodListDir(pane: *Pane, req: *Request, w: *Stringify) Error!void {
     const self = pane.server;
+    for ([_][]const u8{ "path", "query" }) |key| if (req.get(key)) |v| if (v != .string)
+        return req.fail(error.Usage, "{s} must be a string", .{key});
     const root = try self.resolvePath(pane, req, req.str("path") orelse ".");
     const query = req.str("query");
     const r = listdir.list(req.arena, self.io, root, .{
-        .depth = @intCast(req.count("depth", 1, 32)),
+        .depth = @intCast(try req.count("depth", 1, 32)),
         .query = if (query != null and query.?.len > 0) query else null,
-        .limit = req.count("limit", listdir.default_limit, listdir.max_scanned),
+        .limit = try req.count("limit", listdir.default_limit, listdir.max_scanned),
     }) catch |err| return req.fail(error.Fail, "listing {s} failed: {t}", .{ root, err });
     try w.beginObject();
     try w.objectField("path");
@@ -2252,7 +2252,8 @@ test "rex Server: foreground process, list_dir, and program status" {
         defer alloc.free(ev);
         if (T.has(ev, "\"event\":\"program_status_changed\"")) {
             try testing.expect(T.has(ev, "\"state\":\"working\",\"kind\":null,\"msg\":\"hi there\""));
-            try testing.expect(T.has(ev, "\"source\":\"osc7501\",\"updated_at\":1"));
+            try testing.expect(T.has(ev, "\"progress\":null,\"updated_at\":1"));
+            try testing.expect(!T.has(ev, "\"source\""));
             status = true;
         }
         if (T.has(ev, "\"event\":\"process_changed\"") and T.has(ev, "\"name\":\"sleep\"")) sleeping = true;
@@ -2284,7 +2285,29 @@ test "rex Server: foreground process, list_dir, and program status" {
     try testing.expect(T.has(view, "\"status\":{\"state\":\"working\""));
     try testing.expect(T.has(view, "\"last_activity\":1"));
 
+    // A plain title leaves a progress bar's working status alone.
     alloc.free(try T.call(fd,
-        \\{"id":7,"method":"server.stop"}
+        \\{"id":7,"method":"session.create","params":{"label":"dl","command":["/bin/sh","-c","printf '\\033]9;4;1;50\\033\\\\\\033]0;Downloading foo\\007'; exec sleep 30"]}}
+    ));
+    while (true) {
+        const ev = try T.read(events);
+        defer alloc.free(ev);
+        try testing.expect(!T.has(ev, "\"state\":\"done\""));
+        if (T.has(ev, "\"title\":\"Downloading foo\"")) break;
+    }
+    const dl = try T.call(fd,
+        \\{"id":8,"method":"session.view","params":{"session":"dl"}}
+    );
+    defer alloc.free(dl);
+    try testing.expect(T.has(dl, "\"status\":{\"state\":\"working\",\"kind\":null,\"msg\":null,\"progress\":50,"));
+
+    const bad = try T.call(fd,
+        \\{"id":9,"method":"block.method","params":{"session":"chrome","method":"list_dir","path":2024}}
+    );
+    defer alloc.free(bad);
+    try testing.expect(T.has(bad, "\"code\":\"usage\""));
+
+    alloc.free(try T.call(fd,
+        \\{"id":10,"method":"server.stop"}
     ));
 }

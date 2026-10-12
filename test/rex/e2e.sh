@@ -165,6 +165,8 @@ grep -q '"name":".git/HEAD"' "$tmp/out" && fail "list_dir descended into .git"
   fail "list_dir query"
 expect_status 1 "$RAP" block call -b "$fg_block" list_dir path=nope
 expect_status 2 "$RAP" block call -b "$fg_block" list_dir oops
+expect_status 2 "$RAP" block call -b "$fg_block" list_dir path=2024
+expect_status 2 "$RAP" block call -b "$fg_block" list_dir depth=0
 "$RAP" close -b "$fg_block"
 
 # Stopping removes the socket, and without autostart nothing answers.
