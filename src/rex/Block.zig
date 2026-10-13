@@ -94,6 +94,9 @@ pub const Event = union(enum) {
     clipboard_write: terminal.clipboard.Write,
     program_status: terminal.osc.Command.ProgramStatus.Report,
 
+    /// The shell started drawing a primary prompt (OSC 133 A).
+    prompt_start,
+
     /// The child exited with this status. All output the child wrote
     /// before exiting has been reported first.
     child_exited: ChildExited,
@@ -220,6 +223,7 @@ pub fn create(
     handler.effects.progress_report = &progressReport;
     handler.effects.program_status = &programStatus;
     handler.effects.clipboard_write = &clipboardWrite;
+    handler.effects.semantic_prompt = &semanticPrompt;
     handler.effects.reset = &reset;
     self.vt = .init(.{
         .allocator = alloc,
@@ -607,6 +611,14 @@ fn programStatus(
     fromHandler(handler).emit(.{ .program_status = report });
 }
 
+fn semanticPrompt(
+    handler: *terminal.TerminalStream.Handler,
+    e: terminal.SemanticPrompt,
+) void {
+    if (e.kind == .prompt_start and e.prompt_kind == .primary)
+        fromHandler(handler).emit(.prompt_start);
+}
+
 fn clipboardWrite(
     handler: *terminal.TerminalStream.Handler,
     w: terminal.clipboard.Write,
@@ -873,6 +885,7 @@ test "rex Block: effects from a real child become events" {
     const Recorder = struct {
         seen: std.EnumSet(std.meta.Tag(Event)) = .empty,
         pwd: [32]u8 = @splat(0),
+        reply: [32]u8 = @splat(0),
         exit_code: ?u32 = null,
 
         fn onEvent(block: *Block, event: Event) void {
@@ -880,6 +893,7 @@ test "rex Block: effects from a real child become events" {
             r.seen.insert(std.meta.activeTag(event));
             switch (event) {
                 .pwd_changed => |p| @memcpy(r.pwd[0..p.len], p),
+                .write_pty => |p| @memcpy(r.reply[0..p.len], p),
                 .child_exited => |e| r.exit_code = e.exit_code,
                 else => {},
             }
@@ -892,17 +906,18 @@ test "rex Block: effects from a real child become events" {
     var read_buf: ReadBuffer = undefined;
 
     // OSC 7 pwd, BEL, OSC 9 notification, OSC 9;4 progress, OSC 52
-    // clipboard, OSC 7501 program status.
+    // clipboard, OSC 7501 program status and support query, OSC 133 A.
     const block = try Block.create(testing.allocator, &loop, &read_buf, .{
-        .args = &.{ "/bin/sh", "-c", "printf '\\033]7;file://localhost/tmp\\007\\007\\033]9;hi there\\007\\033]9;4;1;50\\007\\033]52;c;aGVsbG8=\\007\\033]7501;state=working:app=probe\\033\\\\'; sleep 0.3; exit 7" },
+        .args = &.{ "/bin/sh", "-c", "printf '\\033]7;file://localhost/tmp\\007\\007\\033]9;hi there\\007\\033]9;4;1;50\\007\\033]52;c;aGVsbG8=\\007\\033]7501;state=working:app=probe\\033\\\\\\033]7501;?\\007\\033]133;A\\007'; sleep 0.3; exit 7" },
         .on_event = &Recorder.onEvent,
         .userdata = &rec,
     });
     defer block.destroy();
     while (!block.isDone()) try loop.run(.once);
 
-    for ([_]std.meta.Tag(Event){ .bell, .desktop_notification, .progress_report, .clipboard_write, .program_status }) |t|
+    for ([_]std.meta.Tag(Event){ .bell, .desktop_notification, .progress_report, .clipboard_write, .program_status, .prompt_start }) |t|
         try testing.expect(rec.seen.contains(t));
     try testing.expectEqualStrings("file://localhost/tmp", std.mem.sliceTo(&rec.pwd, 0));
+    try testing.expectEqualStrings("\x1b]7501;?\x07", std.mem.sliceTo(&rec.reply, 0));
     try testing.expectEqual(@as(?u32, 7), rec.exit_code);
 }

@@ -148,6 +148,30 @@ wait $events 2>/dev/null || true
 grep -q '"event":"program_status_changed".*"state":"done".*"msg":"hi there".*"updated_at":[0-9]' "$tmp/events" ||
   fail "no program_status_changed event with a message and time: $(grep program_status "$tmp/events")"
 
+# A program speaking the program status protocol with the shell function
+# from its specification. block call reads back every record it left.
+cat >"$tmp/status.sh" <<'EOF'
+status() {
+  printf '\033]7501;state=%s:msg=%s\033\\' "$1" "$(printf '%s' "$2" | base64 | tr -d '\n')"
+}
+status working "Syncing photos"
+printf '\033]7501;state=blocked:kind=question:id=sync/ask:app=rsync\007'
+true && status done "Photos synced" || status error "rsync failed"
+exec sleep 30
+EOF
+status_block=$("$RAP" run -s demo -- /bin/sh "$tmp/status.sh")
+i=0
+until "$RAP" block call -b "$status_block" program_status | grep -q '"msg":"Photos synced"'; do
+  i=$((i + 1))
+  [ $i -lt 100 ] || fail "block call program_status never showed done: $("$RAP" block call -b "$status_block" program_status)"
+  sleep 0.05
+done
+"$RAP" block call -b "$status_block" program_status >"$tmp/out"
+grep -q '{"id":"sync/ask","state":"blocked","kind":"question","msg":null,"progress":null,"app":"rsync"' "$tmp/out" ||
+  fail "block call program_status lost the child record: $(cat "$tmp/out")"
+grep -q '{"id":null,"state":"done","kind":null,"msg":"Photos synced"' "$tmp/out" ||
+  fail "block call program_status lost the root record: $(cat "$tmp/out")"
+
 # block call shows the foreground program and lists its directory.
 mkdir -p "$tmp/tree/a/b" "$tmp/tree/.git" "$tmp/tree/node_modules/x"
 touch "$tmp/tree/a/b/c.txt" "$tmp/tree/.git/HEAD" "$tmp/tree/node_modules/x/y.js"

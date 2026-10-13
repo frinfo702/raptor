@@ -101,9 +101,12 @@ const Pane = struct {
     title: std.ArrayList(u8) = .empty,
     pwd: std.ArrayList(u8) = .empty,
     exit_code: ?u32 = null,
-    /// What the program says it is doing, for Activity Mode.
-    status: ?Status = null,
-    status_msg: std.ArrayList(u8) = .empty,
+    /// What programs say they are doing (OSC 7501), for Activity Mode,
+    /// least recently updated first. The root record has the id "".
+    records: std.ArrayList(Record) = .empty,
+    /// An OSC 7501 report arrived since the last full reset, so the
+    /// root record is no longer inferred from titles and OSC 9;4.
+    reported: bool = false,
     /// Wall-clock ms of the latest output.
     last_activity: ?i64 = null,
     /// The foreground process at the latest tick, to notice it change.
@@ -130,18 +133,26 @@ const Pane = struct {
     queued: bool = false,
 };
 
-/// A block's program status. While working or blocked, a status from an
-/// OSC 7501 report holds against one inferred from a spinner in the
-/// title, which holds against one from OSC 9;4 progress.
-// ponytail: one record per block, not one per OSC 7501 id; keep a map
-// when a program reports several records at once.
-const Status = struct {
+/// One program status record: an OSC 7501 report, or until a program
+/// reports one, a root record inferred from the title or OSC 9;4. While
+/// working or blocked, a status inferred from a spinner in the title
+/// holds against one from progress. The strings are slices of `buf`.
+const Record = struct {
+    buf: []u8 = &.{},
+    id: []const u8 = "",
     state: []const u8,
     kind: ?[]const u8 = null,
     progress: ?u8 = null,
+    app: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+    msg: ?[]const u8 = null,
     source: enum { osc7501, title, progress },
     updated_at: i64,
 };
+
+/// The most records a block keeps. A new one past this removes the one
+/// updated least recently.
+const max_records = 256;
 
 /// One client's subscription to one block.
 const Stream = struct {
@@ -820,19 +831,9 @@ fn onBlockEvent(block: *Block, event: Block.Event) void {
             self.progressStatus(pane, p);
         },
         .clipboard_write => self.emit("clipboard_written", &pane.session_id, .{ .block = id }),
-        .program_status => |p| {
-            if (p.state == .clear) return self.setStatus(pane, null, "");
-            var buf: [program_status.max_msg_bytes]u8 = undefined;
-            var msg: std.Io.Writer = .fixed(&buf);
-            p.writeText(.msg, &msg) catch {};
-            self.setStatus(pane, .{
-                .state = @tagName(p.state),
-                .kind = if (p.readOption(.kind)) |k| @tagName(k) else null,
-                .progress = p.readOption(.progress),
-                .source = .osc7501,
-                .updated_at = self.wallMs(),
-            }, msg.buffered());
-        },
+        .program_status => |p| self.programStatus(pane, p),
+        // A new prompt ends whatever was working or waiting on the user.
+        .prompt_start => self.removeRecords(pane, .live, "prompt"),
         .child_exited => |e| {
             pane.exit_code = e.exit_code;
             self.exited[self.exited_next % self.exited.len] = .{ .id = pane.id, .code = e.exit_code };
@@ -850,75 +851,202 @@ fn onBlockEvent(block: *Block, event: Block.Event) void {
 
 // Program status
 
-/// What clients see of a block's status: {state, kind, msg, progress,
-/// updated_at}, with `progress` the OSC 9;4 percentage if one was set.
-const StatusView = struct {
+/// What clients see of a record: the OSC 7501 keys, with `id` null for
+/// the root record and `app` taken from the nearest ancestor that has
+/// one when the record has none.
+const RecordView = struct {
+    id: ?[]const u8,
     state: []const u8,
     kind: ?[]const u8,
     msg: ?[]const u8,
     progress: ?u8,
+    app: ?[]const u8,
+    title: ?[]const u8,
     updated_at: i64,
 };
 
-fn statusView(pane: *const Pane) ?StatusView {
-    const s = pane.status orelse return null;
+fn recordView(pane: *const Pane, r: *const Record) RecordView {
     return .{
-        .state = s.state,
-        .kind = s.kind,
-        .msg = if (pane.status_msg.items.len > 0) pane.status_msg.items else null,
-        .progress = s.progress,
-        .updated_at = s.updated_at,
+        .id = if (r.id.len > 0) r.id else null,
+        .state = r.state,
+        .kind = r.kind,
+        .msg = r.msg,
+        .progress = r.progress,
+        .app = r.app orelse inheritedApp(pane, r.id),
+        .title = r.title,
+        .updated_at = r.updated_at,
     };
 }
 
-/// Replace the block's status, null to clear it, and report it.
-fn setStatus(self: *Server, pane: *Pane, status: ?Status, msg: []const u8) void {
-    pane.status = status;
-    pane.status_msg.clearRetainingCapacity();
-    pane.status_msg.appendSlice(self.alloc, msg) catch {};
-    const view = statusView(pane) orelse StatusView{
-        .state = "clear",
-        .kind = null,
-        .msg = null,
-        .progress = null,
+/// Every record of a block, as a JSON array of `RecordView`.
+const RecordsView = struct {
+    pane: *const Pane,
+
+    pub fn jsonStringify(self: RecordsView, w: *Stringify) Stringify.Error!void {
+        try w.beginArray();
+        for (self.pane.records.items) |*r| try w.write(recordView(self.pane, r));
+        try w.endArray();
+    }
+};
+
+fn findRecord(pane: *const Pane, id: []const u8) ?*Record {
+    for (pane.records.items) |*r| if (std.mem.eql(u8, r.id, id)) return r;
+    return null;
+}
+
+/// The app of the nearest ancestor of `id` that has one: "a/b" asks
+/// "a", then the root record.
+fn inheritedApp(pane: *const Pane, id: []const u8) ?[]const u8 {
+    var parent = id;
+    while (parent.len > 0) {
+        parent = parent[0 .. std.mem.lastIndexOfScalar(u8, parent, '/') orelse 0];
+        if (findRecord(pane, parent)) |p| if (p.app) |a| return a;
+    }
+    return null;
+}
+
+/// The root record, which session.view shows as the block's status.
+fn rootView(pane: *const Pane) ?RecordView {
+    return recordView(pane, findRecord(pane, "") orelse return null);
+}
+
+/// An OSC 7501 report. A full reset reports a clear with no body, which
+/// a program can't send.
+fn programStatus(self: *Server, pane: *Pane, p: program_status.Report) void {
+    const reset = p.data.len == 0;
+    pane.reported = !reset;
+    if (p.state == .clear) {
+        const id = p.readOption(.id) orelse return self.removeRecords(pane, .all, if (reset) "reset" else "clear");
+        return self.removeRecords(pane, .{ .subtree = id }, "clear");
+    }
+    var title_buf: [program_status.max_title_bytes]u8 = undefined;
+    var title: std.Io.Writer = .fixed(&title_buf);
+    p.writeText(.title, &title) catch {};
+    var msg_buf: [program_status.max_msg_bytes]u8 = undefined;
+    var msg: std.Io.Writer = .fixed(&msg_buf);
+    p.writeText(.msg, &msg) catch {};
+    self.setRecord(pane, .{
+        .id = p.readOption(.id) orelse "",
+        .state = @tagName(p.state),
+        .kind = if (p.readOption(.kind)) |k| @tagName(k) else null,
+        .progress = p.readOption(.progress),
+        .app = p.readOption(.app),
+        .title = if (title.end > 0) title.buffered() else null,
+        .msg = if (msg.end > 0) msg.buffered() else null,
+        .source = .osc7501,
         .updated_at = self.wallMs(),
-    };
+    }, "report");
+}
+
+/// Replace the record with `r.id`, or add it, and report it. `r`'s
+/// strings are copied.
+fn setRecord(self: *Server, pane: *Pane, r: Record, reason: []const u8) void {
+    var rec = r;
+    rec.buf = std.mem.concat(self.alloc, u8, &.{ r.id, r.app orelse "", r.title orelse "", r.msg orelse "" }) catch return;
+    var off: usize = 0;
+    inline for (.{ "id", "app", "title", "msg" }) |f| {
+        if (@as(?[]const u8, @field(r, f))) |v| {
+            @field(rec, f) = rec.buf[off..][0..v.len];
+            off += v.len;
+        }
+    }
+
+    if (findRecord(pane, r.id)) |old| {
+        self.alloc.free(old.buf);
+        _ = pane.records.orderedRemove(old - pane.records.items.ptr);
+    } else if (pane.records.items.len >= max_records) {
+        self.removeRecords(pane, .{ .exact = pane.records.items[0].id }, "evicted");
+    }
+    pane.records.append(self.alloc, rec) catch return self.alloc.free(rec.buf);
+
+    const view = recordView(pane, &pane.records.items[pane.records.items.len - 1]);
     self.emit("program_status_changed", &pane.session_id, .{
         .block = prefixed("block", &pane.id),
-        .state = view.state,
-        .kind = view.kind,
-        .msg = view.msg,
-        .progress = view.progress,
-        .updated_at = view.updated_at,
+        .id = view.id,
+        .record = view,
+        .reason = reason,
     });
 }
 
-/// Set a status inferred from the title or progress, unless a working or
-/// blocked status from a stronger source holds. Only a change is reported.
+const Removal = union(enum) {
+    all,
+    /// The record and every record beneath it.
+    subtree: []const u8,
+    exact: []const u8,
+    /// Working and blocked records, which end with the process or at the
+    /// next prompt.
+    live,
+};
+
+/// Remove the records `which` selects, and report their ids.
+fn removeRecords(self: *Server, pane: *Pane, which: Removal, reason: []const u8) void {
+    const n = pane.records.items.len;
+    const removed = self.alloc.alloc(?[]const u8, n) catch return;
+    defer self.alloc.free(removed);
+    const bufs = self.alloc.alloc([]u8, n) catch return;
+    defer self.alloc.free(bufs);
+
+    var gone: usize = 0;
+    var i: usize = 0;
+    while (i < pane.records.items.len) {
+        const r = pane.records.items[i];
+        const hit = switch (which) {
+            .all => true,
+            .exact => |id| std.mem.eql(u8, r.id, id),
+            .subtree => |id| std.mem.startsWith(u8, r.id, id) and
+                (r.id.len == id.len or r.id[id.len] == '/'),
+            .live => live(&r),
+        };
+        if (!hit) {
+            i += 1;
+            continue;
+        }
+        removed[gone] = if (r.id.len > 0) r.id else null;
+        bufs[gone] = r.buf;
+        gone += 1;
+        _ = pane.records.orderedRemove(i);
+    }
+    defer for (bufs[0..gone]) |b| self.alloc.free(b);
+    if (gone == 0) return;
+    self.emit("program_status_removed", &pane.session_id, .{
+        .block = prefixed("block", &pane.id),
+        .ids = removed[0..gone],
+        .reason = reason,
+    });
+}
+
+fn live(r: *const Record) bool {
+    return std.mem.eql(u8, r.state, "working") or std.mem.eql(u8, r.state, "blocked");
+}
+
+/// Set a root record inferred from the title or progress, unless a
+/// program has reported its status, or a working or blocked status from
+/// a stronger source holds. Only a change is reported.
 fn inferStatus(
     self: *Server,
     pane: *Pane,
-    source: @FieldType(Status, "source"),
+    source: @FieldType(Record, "source"),
     state: []const u8,
     progress: ?u8,
     msg: []const u8,
 ) void {
-    if (pane.status) |s| {
-        if (@backingInt(s.source) < @backingInt(source) and
-            (std.mem.eql(u8, s.state, "working") or std.mem.eql(u8, s.state, "blocked"))) return;
+    if (pane.reported) return;
+    if (findRecord(pane, "")) |s| {
+        if (@backingInt(s.source) < @backingInt(source) and live(s)) return;
         if (s.source == source and std.mem.eql(u8, s.state, state) and s.progress == progress and
-            std.mem.eql(u8, pane.status_msg.items, msg)) return;
+            std.mem.eql(u8, s.msg orelse "", msg)) return;
     }
-    self.setStatus(pane, .{
+    self.setRecord(pane, .{
         .state = state,
         .progress = progress,
+        .msg = if (msg.len > 0) msg else null,
         .source = source,
         .updated_at = self.wallMs(),
-    }, msg);
+    }, "inferred");
 }
 
 fn working(pane: *const Pane) bool {
-    const s = pane.status orelse return false;
+    const s = findRecord(pane, "") orelse return false;
     return std.mem.eql(u8, s.state, "working");
 }
 
@@ -940,7 +1068,7 @@ fn progressStatus(self: *Server, pane: *Pane, p: @FieldType(Block.Event, "progre
 fn titleStatus(self: *Server, pane: *Pane, title: []const u8) void {
     const t = splitTitle(title);
     if (t.spinner) return self.inferStatus(pane, .title, "working", null, t.text);
-    const s = pane.status orelse return;
+    const s = findRecord(pane, "") orelse return;
     if (s.source == .title and working(pane)) self.inferStatus(pane, .title, "done", null, t.text);
 }
 
@@ -1172,7 +1300,8 @@ fn freePane(self: *Server, pane: *Pane) void {
     self.alloc.free(pane.label);
     pane.title.deinit(self.alloc);
     pane.pwd.deinit(self.alloc);
-    pane.status_msg.deinit(self.alloc);
+    for (pane.records.items) |r| self.alloc.free(r.buf);
+    pane.records.deinit(self.alloc);
     pane.waiters.deinit(self.alloc);
     pane.streams.deinit(self.alloc);
     if (pane.ring) |r| self.alloc.destroy(r);
@@ -1700,7 +1829,8 @@ fn writePane(pane: *Pane, w: *Stringify) Error!void {
         .cols = term.cols,
         .rows = term.rows,
         .exit_code = pane.exit_code,
-        .status = statusView(pane),
+        .status = rootView(pane),
+        .program_status = RecordsView{ .pane = pane },
         .last_activity = pane.last_activity,
     });
 }
@@ -1877,8 +2007,8 @@ fn sessionDescribeBlock(self: *Server, req: *Request, w: *Stringify) Error!void 
     try w.objectField("events");
     try w.write([_][]const u8{
         "bell",            "child_exited",    "clipboard_written",      "desktop_notification",
-        "process_changed", "progress_report", "program_status_changed", "pwd_changed",
-        "title_changed",
+        "process_changed", "progress_report", "program_status_changed", "program_status_removed",
+        "pwd_changed",     "title_changed",
     });
     try w.endObject();
 }
@@ -1953,6 +2083,7 @@ const block_methods = std.StaticStringMap(BlockMethod).initComptime(.{
     .{ "format", &methodFormat },
     .{ "list_dir", &methodListDir },
     .{ "process", &methodProcess },
+    .{ "program_status", &methodProgramStatus },
     .{ "reset", &methodReset },
     .{ "size", &methodSize },
     .{ "title", &methodTitle },
@@ -1987,6 +2118,11 @@ fn methodReset(pane: *Pane, _: *Request, w: *Stringify) Error!void {
     for (pane.streams.items) |st| self.resync(st);
     for (pane.streams.items) |st| self.pump(st.client);
     try w.write(.{});
+}
+
+/// The status records programs have reported (OSC 7501).
+fn methodProgramStatus(pane: *Pane, _: *Request, w: *Stringify) Error!void {
+    try w.write(.{ .records = RecordsView{ .pane = pane } });
 }
 
 /// The block's child, and the foreground process: the program the user
@@ -2252,7 +2388,7 @@ test "rex Server: foreground process, list_dir, and program status" {
         defer alloc.free(ev);
         if (T.has(ev, "\"event\":\"program_status_changed\"")) {
             try testing.expect(T.has(ev, "\"state\":\"working\",\"kind\":null,\"msg\":\"hi there\""));
-            try testing.expect(T.has(ev, "\"progress\":null,\"updated_at\":1"));
+            try testing.expect(T.has(ev, "\"progress\":null,\"app\":null,\"title\":null,\"updated_at\":1"));
             try testing.expect(!T.has(ev, "\"source\""));
             status = true;
         }
@@ -2282,7 +2418,7 @@ test "rex Server: foreground process, list_dir, and program status" {
         \\{"id":6,"method":"session.view","params":{"session":"chrome"}}
     );
     defer alloc.free(view);
-    try testing.expect(T.has(view, "\"status\":{\"state\":\"working\""));
+    try testing.expect(T.has(view, "\"status\":{\"id\":null,\"state\":\"working\""));
     try testing.expect(T.has(view, "\"last_activity\":1"));
 
     // A plain title leaves a progress bar's working status alone.
@@ -2299,7 +2435,7 @@ test "rex Server: foreground process, list_dir, and program status" {
         \\{"id":8,"method":"session.view","params":{"session":"dl"}}
     );
     defer alloc.free(dl);
-    try testing.expect(T.has(dl, "\"status\":{\"state\":\"working\",\"kind\":null,\"msg\":null,\"progress\":50,"));
+    try testing.expect(T.has(dl, "\"status\":{\"id\":null,\"state\":\"working\",\"kind\":null,\"msg\":null,\"progress\":50,"));
 
     const bad = try T.call(fd,
         \\{"id":9,"method":"block.method","params":{"session":"chrome","method":"list_dir","path":2024}}
@@ -2310,4 +2446,187 @@ test "rex Server: foreground process, list_dir, and program status" {
     alloc.free(try T.call(fd,
         \\{"id":10,"method":"server.stop"}
     ));
+}
+
+test "rex Server: program status protocol" {
+    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    const path = try std.fmt.allocPrintSentinel(alloc, "/tmp/rex-test-status-{d}.sock", .{c.getpid()}, 0);
+    defer alloc.free(path);
+    const lock_path = try std.fmt.allocPrintSentinel(alloc, "{s}.lock", .{path}, 0);
+    defer alloc.free(lock_path);
+    defer _ = c.unlink(lock_path);
+    defer _ = c.unlink(path);
+
+    var env: EnvMap = .init(alloc);
+    defer env.deinit();
+    try env.put("PATH", "/usr/bin:/bin");
+
+    const server = try Server.create(alloc, io, .{ .socket_path = path, .env = &env });
+    defer server.destroy();
+    const thread = try std.Thread.spawn(.{}, (struct {
+        fn run(srv: *Server) void {
+            srv.run() catch |err| std.debug.panic("server failed: {t}", .{err});
+        }
+    }).run, .{server});
+    defer thread.join();
+
+    const events = try protocol.connect(path);
+    defer _ = c.close(events);
+    const fd = try protocol.connect(path);
+    defer _ = c.close(fd);
+
+    const T = struct {
+        events: posix.fd_t,
+        fd: posix.fd_t,
+
+        fn read(sock: posix.fd_t) ![]u8 {
+            var pfd = [_]posix.pollfd{.{ .fd = sock, .events = posix.POLL.IN, .revents = 0 }};
+            if (try posix.poll(&pfd, 10_000) == 0) return error.Timeout;
+            return (try protocol.readFrame(testing.allocator, sock)).payload;
+        }
+        fn call(t: @This(), req: anytype) ![]u8 {
+            const json = try std.json.Stringify.valueAlloc(testing.allocator, req, .{});
+            defer testing.allocator.free(json);
+            try protocol.writeFrame(t.fd, .json, json);
+            return read(t.fd);
+        }
+        /// Run `out` in a new session, and return the status events it
+        /// causes, one per line.
+        fn run(t: @This(), label: []const u8, out: []const u8) ![]u8 {
+            const script = try std.mem.concat(testing.allocator, u8, &.{ out, "; printf '\x1b]0;end\x07'; exec sleep 30" });
+            defer testing.allocator.free(script);
+            testing.allocator.free(try t.call(.{ .id = 2, .method = "session.create", .params = .{
+                .label = label,
+                .command = &[_][]const u8{ "/bin/sh", "-c", script },
+            } }));
+            var got: std.ArrayList(u8) = .empty;
+            errdefer got.deinit(testing.allocator);
+            while (true) {
+                const ev = try read(t.events);
+                defer testing.allocator.free(ev);
+                if (has(ev, "\"title\":\"end\"")) return got.toOwnedSlice(testing.allocator);
+                if (!has(ev, "\"event\":\"program_status_")) continue;
+                try got.appendSlice(testing.allocator, ev);
+                try got.append(testing.allocator, '\n');
+            }
+        }
+        fn records(t: @This(), label: []const u8) ![]u8 {
+            return t.call(.{ .id = 3, .method = "block.method", .params = .{ .session = label, .method = "program_status" } });
+        }
+        fn has(payload: []const u8, needle: []const u8) bool {
+            return std.mem.indexOf(u8, payload, needle) != null;
+        }
+        fn count(payload: []const u8, needle: []const u8) usize {
+            return std.mem.count(u8, payload, needle);
+        }
+    };
+    const t: T = .{ .events = events, .fd = fd };
+    try protocol.writeFrame(events, .json,
+        \\{"id":1,"method":"session.subscribe"}
+    );
+    testing.allocator.free(try T.read(events));
+
+    // The specification's "One program" example, ended with ST. The done
+    // record survives a new prompt, and once a program has reported,
+    // OSC 9;4 no longer sets the status.
+    {
+        const ev = try t.run("brew", "printf '%s' '" ++
+            "\x1b]7501;state=working:app=brew:msg=SW5zdGFsbGluZyB1cGRhdGVz\x1b\\" ++
+            "\x1b]7501;state=blocked:kind=auth:app=brew:msg=UGFzc3dvcmQgcmVxdWlyZWQgdG8gaW5zdGFsbCB1cGRhdGVz\x1b\\" ++
+            "\x1b]7501;state=working:app=brew:msg=SW5zdGFsbGluZyB1cGRhdGVz\x1b\\" ++
+            "\x1b]7501;state=done:app=brew:msg=VXBncmFkZWQgMTIgcGFja2FnZXM=\x1b\\" ++
+            "\x1b]133;A\x07\x1b]9;4;1;50\x07'");
+        defer alloc.free(ev);
+        try testing.expectEqual(4, T.count(ev, "\"event\":\"program_status_changed\""));
+        try testing.expectEqual(4, T.count(ev, "\"reason\":\"report\""));
+        try testing.expect(!T.has(ev, "program_status_removed"));
+        try testing.expect(T.has(ev, "\"id\":null,\"record\":{\"id\":null,\"state\":\"blocked\",\"kind\":\"auth\"," ++
+            "\"msg\":\"Password required to install updates\",\"progress\":null,\"app\":\"brew\",\"title\":null,\"updated_at\":1"));
+
+        const view = try t.call(.{ .id = 4, .method = "session.view", .params = .{ .session = "brew" } });
+        defer alloc.free(view);
+        try testing.expect(T.has(view, "\"status\":{\"id\":null,\"state\":\"done\",\"kind\":null,\"msg\":\"Upgraded 12 packages\",\"progress\":null,\"app\":\"brew\""));
+        // The root record, as the status and as the only record.
+        try testing.expect(T.has(view, "\"program_status\":[{\"id\":null,\"state\":\"done\""));
+        try testing.expectEqual(2, T.count(view, "\"state\":"));
+    }
+
+    // The "Several records" example, stopped while eu-west is blocked:
+    // the root still says working, and the regions take app from it.
+    const deploy_start = "\x1b]7501;state=working:app=deploy:msg=RGVwbG95aW5nIHYyLjQuMQ==\x07" ++
+        "\x1b]7501;state=working:id=us-east:title=VVMgRWFzdA==:progress=40:msg=UHVzaGluZyBpbWFnZQ==\x07" ++
+        "\x1b]7501;state=blocked:kind=permission:id=eu-west:title=RVUgV2VzdA==:msg=QXBwcm92ZSBkZXBsb3kgdG8gZXUtd2VzdCAocHJvZHVjdGlvbik/\x07";
+    {
+        const ev = try t.run("deploy-mid", "printf '%s' '" ++ deploy_start ++ "'");
+        defer alloc.free(ev);
+        try testing.expect(T.has(ev, "\"id\":\"eu-west\",\"record\":{\"id\":\"eu-west\",\"state\":\"blocked\",\"kind\":\"permission\"," ++
+            "\"msg\":\"Approve deploy to eu-west (production)?\",\"progress\":null,\"app\":\"deploy\",\"title\":\"EU West\""));
+        const recs = try t.records("deploy-mid");
+        defer alloc.free(recs);
+        try testing.expect(T.has(recs, "{\"records\":[{\"id\":null,\"state\":\"working\",\"kind\":null,\"msg\":\"Deploying v2.4.1\""));
+        try testing.expect(T.has(recs, "{\"id\":\"us-east\",\"state\":\"working\",\"kind\":null,\"msg\":\"Pushing image\",\"progress\":40,\"app\":\"deploy\",\"title\":\"US East\""));
+        try testing.expectEqual(3, T.count(recs, "\"state\":"));
+    }
+
+    // The whole example: clearing the regions leaves the root's done.
+    {
+        const ev = try t.run("deploy", "printf '%s' '" ++ deploy_start ++
+            "\x1b]7501;state=done:id=us-east:title=VVMgRWFzdA==:msg=SGVhbHRoeQ==\x07" ++
+            "\x1b]7501;state=clear:id=us-east\x07" ++
+            "\x1b]7501;state=clear:id=eu-west\x07" ++
+            "\x1b]7501;state=done:app=deploy:msg=RGVwbG95ZWQgdG8gMyByZWdpb25z\x07'");
+        defer alloc.free(ev);
+        try testing.expect(T.has(ev, "\"ids\":[\"us-east\"],\"reason\":\"clear\""));
+        try testing.expect(T.has(ev, "\"ids\":[\"eu-west\"],\"reason\":\"clear\""));
+        const recs = try t.records("deploy");
+        defer alloc.free(recs);
+        try testing.expect(T.has(recs, "{\"records\":[{\"id\":null,\"state\":\"done\",\"kind\":null,\"msg\":\"Deployed to 3 regions\""));
+        try testing.expectEqual(1, T.count(recs, "\"state\":"));
+    }
+
+    // Clearing removes a subtree, a malformed id never falls back to the
+    // root, a prompt drops working and blocked records, and a full reset
+    // drops the rest and lets OSC 9;4 set the status again.
+    {
+        const ev = try t.run("life", "printf '%s' '" ++
+            "\x1b]7501;state=working:app=a\x07" ++
+            "\x1b]7501;state=blocked:kind=question:id=x\x07" ++
+            "\x1b]7501;state=done:id=d\x07" ++
+            "\x1b]7501;state=idle:id=i\x07" ++
+            "\x1b]7501;state=working:id=build\x07" ++
+            "\x1b]7501;state=working:id=build/test\x07" ++
+            "\x1b]7501;state=working:id=buildx\x07" ++
+            "\x1b]7501;state=clear:id=a//b\x07" ++
+            "\x1b]7501;state=sleeping\x07" ++
+            "\x1b]7501;state=clear:id=build\x07" ++
+            "\x1b]133;A\x07" ++
+            "\x1bc" ++
+            "\x1b]9;4;1;50\x07'");
+        defer alloc.free(ev);
+        try testing.expectEqual(7, T.count(ev, "\"reason\":\"report\""));
+        try testing.expectEqual(3, T.count(ev, "program_status_removed"));
+        try testing.expect(T.has(ev, "\"ids\":[\"build\",\"build/test\"],\"reason\":\"clear\""));
+        try testing.expect(T.has(ev, "\"ids\":[null,\"x\",\"buildx\"],\"reason\":\"prompt\""));
+        try testing.expect(T.has(ev, "\"ids\":[\"d\",\"i\"],\"reason\":\"reset\""));
+        try testing.expect(T.has(ev, "\"state\":\"working\",\"kind\":null,\"msg\":null,\"progress\":50,\"app\":null,\"title\":null,\"updated_at\":1"));
+        try testing.expect(T.has(ev, "\"reason\":\"inferred\""));
+    }
+
+    // Past 256 records, the one updated least recently goes.
+    {
+        const ev = try t.run("many", "i=0; while [ $i -le 256 ]; do printf '\\033]7501;state=idle:id=r%d\\007' $i; i=$((i+1)); done");
+        defer alloc.free(ev);
+        try testing.expectEqual(257, T.count(ev, "\"reason\":\"report\""));
+        try testing.expect(T.has(ev, "\"ids\":[\"r0\"],\"reason\":\"evicted\""));
+        const recs = try t.records("many");
+        defer alloc.free(recs);
+        try testing.expectEqual(max_records, T.count(recs, "\"state\":"));
+        try testing.expect(T.has(recs, "{\"records\":[{\"id\":\"r1\","));
+    }
+
+    alloc.free(try t.call(.{ .id = 5, .method = "server.stop" }));
 }
