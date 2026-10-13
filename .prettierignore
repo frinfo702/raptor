@@ -16,6 +16,7 @@ macos/
 
 # produced by Icon Composer on macOS
 images/Ghostty.icon/icon.json
+images/Raptor.icon/icon.json
 
 # website dev run
 website/.next
