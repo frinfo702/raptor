@@ -1,0 +1,64 @@
+# Fork-only: attach an ad-hoc-signed Raptor DMG to each GitHub release.
+# Free (no Apple Developer Program), so the app is not notarized and the
+# release notes tell users how to open it.
+name: Raptor Release DMG
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and attach the DMG to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    # Apple silicon runner: the DMG is arm64-only, matching the bundled rap.
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+
+      - name: Xcode Version
+        run: xcodebuild -version
+
+      - name: Build DMG
+        run: echo "DMG=$(dist/macos/raptor-dmg.sh "$TAG")" >> "$GITHUB_ENV"
+
+      - name: Upload DMG
+        run: gh release upload "$TAG" "$DMG" --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Append install notes
+        run: |
+          marker="<!-- raptor-dmg-notes -->"
+          notes="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body)"
+          case "$notes" in *"$marker"*) exit 0 ;; esac
+          cat > notes.md <<EOF
+          $notes
+
+          $marker
+          ## Installing $DMG
+
+          Requires an Apple silicon Mac. Open the DMG and drag Raptor to
+          Applications. The app is ad-hoc signed, not notarized, so macOS
+          blocks the first launch. Either:
+
+          - Open Raptor once, then go to System Settings → Privacy & Security
+            and click **Open Anyway**, or
+          - run \`xattr -dr com.apple.quarantine /Applications/Raptor.app\`.
+          EOF
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
