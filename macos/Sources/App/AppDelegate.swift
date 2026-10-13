@@ -1000,9 +1000,10 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newTab(_ sender: Any?) {
-        // No window is main while the app is inactive (the Dock menu, scripting), so
-        // fall back to the frontmost terminal window.
-        let front = NSApp.mainWindow ?? NSApp.orderedWindows.first { $0.windowController is BaseTerminalController }
+        // The main window may be missing (inactive app: Dock menu, scripting) or not a
+        // terminal (About), so fall back to the frontmost terminal window.
+        let isTerminal = { (w: NSWindow) in w.windowController is BaseTerminalController }
+        let front = NSApp.mainWindow.flatMap { isTerminal($0) ? $0 : nil } ?? NSApp.orderedWindows.first(where: isTerminal)
         if let raptor = front?.windowController as? RaptorController {
             raptor.newTab()
             return
