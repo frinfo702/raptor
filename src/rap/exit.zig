@@ -20,6 +20,7 @@ pub const Code = enum(u8) {
     /// The command was interrupted (128 + SIGINT).
     interrupted = 130,
 
-    /// `wait` and `run --wait` pass through any status of the child.
+    /// `wait` and `run --wait` pass through any status of the child. A `--`
+    /// command that isn't on the caller's PATH exits 127, as in a shell.
     _,
 };

@@ -583,7 +583,10 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
     private func syncRestoration(_ config: Ghostty.Config) {
         guard isWindowLoaded, let window else { return }
         // Setting all three of these is required for restoration to work.
-        window.isRestorable = restorable && config.windowSaveState != "never"
+        // Raptor restores by reattaching to the rap server's sessions, so a plain
+        // window is never saved; restoring it would respawn its shells and keep
+        // the app from reattaching on launch.
+        window.isRestorable = false
         window.restorationClass = TerminalWindowRestoration.self
         window.identifier = .init(String(describing: TerminalWindowRestoration.self))
     }

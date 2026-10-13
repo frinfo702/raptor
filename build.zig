@@ -205,8 +205,10 @@ pub fn build(b: *std.Build) !void {
     }
 
     // Raptor CLI, installed regardless of the app runtime.
+    var rap_exe: ?*std.Build.Step.Compile = null;
     if (config.emit_rap) {
         const rap = try buildpkg.RapExe.init(b, &config, &deps, test_filters);
+        rap_exe = rap.exe;
         rap.install();
         test_step.dependOn(&rap.test_run.step);
         b.step("rap", "Build and install only the rap executable").dependOn(&rap.install_step.step);
@@ -279,6 +281,7 @@ pub fn build(b: *std.Build) !void {
                 .docs = &docs,
                 .i18n = if (i18n) |v| &v else null,
                 .resources = &resources,
+                .rap = rap_exe,
             },
         );
         if (config.emit_macos_app) {
@@ -327,6 +330,7 @@ pub fn build(b: *std.Build) !void {
                     .docs = &docs,
                     .i18n = if (i18n) |v| &v else null,
                     .resources = &resources,
+                    .rap = rap_exe,
                 },
             );
 

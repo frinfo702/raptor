@@ -157,6 +157,15 @@ test "rap without a server exits 4" {
     try testRun(&.{ "-S", "/nonexistent/rap.sock", "ls" }, .unreachable_server, "", "rap: no server running on /nonexistent/rap.sock\n");
 }
 
+test "rap run of a program not on PATH exits 127 without a server" {
+    try testRun(
+        &.{ "-S", "/nonexistent/rap.sock", "run", "--", "raptor-no-such-program" },
+        @fromBackingInt(@intCast(127)),
+        "",
+        "rap: raptor-no-such-program: command not found\n",
+    );
+}
+
 test "rap exit codes" {
     try std.testing.expectEqual(0, @backingInt(ExitCode.ok));
     try std.testing.expectEqual(1, @backingInt(ExitCode.fail));

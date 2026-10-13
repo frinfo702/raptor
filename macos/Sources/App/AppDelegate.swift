@@ -375,7 +375,9 @@ class AppDelegate: NSObject,
             //   - if we're restoring from persisted state
             if TerminalController.all.isEmpty && derivedConfig.initialWindow {
                 undoManager.disableUndoRegistration()
-                _ = TerminalController.newWindow(ghostty)
+                if !RaptorClient.openSessions(ghostty) {
+                    _ = TerminalController.newWindow(ghostty)
+                }
                 undoManager.enableUndoRegistration()
             }
         }
@@ -468,7 +470,9 @@ class AppDelegate: NSObject,
         }
 
         // No visible windows, open a new one.
-        _ = TerminalController.newWindow(ghostty)
+        if !RaptorClient.openSessions(ghostty) {
+            _ = TerminalController.newWindow(ghostty)
+        }
         return false
     }
 
@@ -765,6 +769,11 @@ class AppDelegate: NSObject,
         guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
         guard let window = surfaceView.window else { return }
 
+        if let raptor = window.windowController as? RaptorController {
+            raptor.newTab()
+            return
+        }
+
         // We only want to listen to new tabs if the focused parent is
         // a regular terminal controller.
         guard window.windowController is TerminalController else { return }
@@ -991,6 +1000,14 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newTab(_ sender: Any?) {
+        // The main window may be missing (inactive app: Dock menu, scripting) or not a
+        // terminal (About), so fall back to the frontmost terminal window.
+        let isTerminal = { (w: NSWindow) in w.windowController is BaseTerminalController }
+        let front = NSApp.mainWindow.flatMap { isTerminal($0) ? $0 : nil } ?? NSApp.orderedWindows.first(where: isTerminal)
+        if let raptor = front?.windowController as? RaptorController {
+            raptor.newTab()
+            return
+        }
         _ = TerminalController.newTab(
             ghostty,
             from: TerminalController.preferredParent?.window
