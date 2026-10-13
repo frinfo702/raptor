@@ -154,6 +154,26 @@ final class RaptorSmokeTests: XCTestCase {
         XCTAssertEqual(rap.terminationStatus, 0)
         waitForNewFocus("rap split")
 
+        // A pane picked here keeps the keyboard when the server closes another one.
+        let newest = try XCTUnwrap(controller.window?.firstResponder as? Ghostty.SurfaceView)
+        let panes = Array(controller.surfaceTree)
+        let picked = try XCTUnwrap(panes.dropFirst().first { $0 !== newest })
+        Ghostty.moveFocus(to: picked)
+        var deadline = Date().addingTimeInterval(10)
+        while controller.window?.firstResponder !== picked && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        client.call("block.close", ["block": try XCTUnwrap(controller.block(of: newest))])
+        deadline = Date().addingTimeInterval(10)
+        while controller.surfaceTree.contains(newest) && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertFalse(controller.surfaceTree.contains(newest), "block.close: the pane stayed")
+        XCTAssertTrue(controller.window?.firstResponder === picked, "block.close: focus left the picked pane")
+        old = Array(controller.surfaceTree)
+
         // ⌘T: libghostty's new_tab action.
         focused = try XCTUnwrap(controller.window?.firstResponder as? Ghostty.SurfaceView)
         ghostty.newTab(surface: try XCTUnwrap(focused.surface))

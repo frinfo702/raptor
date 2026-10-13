@@ -298,6 +298,13 @@ class RaptorController: BaseTerminalController {
     override func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
         super.focusedSurfaceDidChange(to: to)
         if let to, to !== focusedPane { focusedPane = to }
+        // Keep the server's focused block on the pane the user picked, so its own focus
+        // moves (closing a pane, zooming) start from there.
+        if let to, let block = block(of: to),
+           let w = view?.windows.first(where: { $0.id == view?.active_window }),
+           w.focused_block != block {
+            client.call("session.focus", ["session": session, "block": block])
+        }
     }
 
     /// The session ended, so there is nothing left to show.
