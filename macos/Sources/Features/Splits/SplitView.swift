@@ -32,7 +32,8 @@ struct SplitView<L: View, R: View>: View {
 
     /// The visible size of the splitter, in points. The invisible size is a transparent hitbox that can still
     /// be used for getting a resize handle. The total width/height of the splitter is the sum of both.
-    private let splitterVisibleSize: CGFloat = 1
+    /// The visible size is also the gap between the two views.
+    private let splitterVisibleSize: CGFloat
     private let splitterInvisibleSize: CGFloat = 6
 
     var body: some View {
@@ -73,6 +74,7 @@ struct SplitView<L: View, R: View>: View {
         _ direction: SplitViewDirection,
         _ split: Binding<CGFloat>,
         dividerColor: Color,
+        dividerSize: CGFloat = 1,
         resizeIncrements: NSSize = .init(width: 1, height: 1),
         @ViewBuilder left: (() -> L),
         @ViewBuilder right: (() -> R),
@@ -81,6 +83,7 @@ struct SplitView<L: View, R: View>: View {
         self.direction = direction
         self._split = split
         self.dividerColor = dividerColor
+        self.splitterVisibleSize = dividerSize
         self.resizeIncrements = resizeIncrements
         self.left = left()
         self.right = right()
@@ -130,12 +133,12 @@ struct SplitView<L: View, R: View>: View {
             // For horizontal layouts we offset the starting X by the left rect
             // and make the width fit the remaining space.
             result.origin.x += leftRect.size.width
-            result.origin.x += splitterVisibleSize / 2
+            result.origin.x += splitterVisibleSize
             result.size.width -= result.origin.x
 
         case .vertical:
             result.origin.y += leftRect.size.height
-            result.origin.y += splitterVisibleSize / 2
+            result.origin.y += splitterVisibleSize
             result.size.height -= result.origin.y
         }
 
@@ -146,10 +149,10 @@ struct SplitView<L: View, R: View>: View {
     private func splitterPoint(for size: CGSize, leftRect: CGRect) -> CGPoint {
         switch direction {
         case .horizontal:
-            return CGPoint(x: leftRect.size.width, y: size.height / 2)
+            return CGPoint(x: leftRect.size.width + splitterVisibleSize / 2, y: size.height / 2)
 
         case .vertical:
-            return CGPoint(x: size.width / 2, y: leftRect.size.height)
+            return CGPoint(x: size.width / 2, y: leftRect.size.height + splitterVisibleSize / 2)
         }
     }
 

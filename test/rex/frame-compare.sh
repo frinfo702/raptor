@@ -1,12 +1,21 @@
 #!/bin/sh
-# Frame-compare Raptor's title bar and splits with Rex's reference frames.
+# Frame-compare Raptor's title bar and panes with Rex's reference frames.
 #
 # Opens a session window at 1080x720 pt on a private server with a reference
 # theme, screenshots it at 2x, and checks geometry and token colours:
-#   dark  (bg #161616, vs v4_4fps_001.jpg): title bar 40 pt, chrome #131313,
-#         active pill 220x27 pt, split divider #242424;
-#   light (bg #F8F6FB, vs acc_on_crop_tabstrip_light.png): chrome #FDFBFF,
-#         separators #CECCD1 between inactive tabs.
+#   dark  (bg #161616, vs v4_4fps_001.jpg; Solid, compact, no headers):
+#         title bar 40 pt, chrome #131313, active pill 220x27 pt, split
+#         divider #242424;
+#   light (bg #F8F6FB, vs acc_on_crop_tabstrip_light.png; same): chrome
+#         #FDFBFF, separators #CECCD1 between inactive tabs;
+#   islands (bg #131313, vs v1_4fps_001.jpg; Solid, islands, headers): cards
+#         inset 8 pt (6 pt under the title bar), 9 pt gutter, 10 pt radius,
+#         border #262626, chrome #111111 between them, card #131313;
+#   compact (bg #0F1518, vs v2_4fps_049.jpg; Solid, compact, headers):
+#         divider #1E2226, 34 pt headers, #0B1212 when unfocused, the pane
+#         background when focused;
+#   fresh (default theme; Blended, islands, headers pinned to the default
+#         values so saved Settings can't leak in): islands with headers.
 # Colours must be within 2/255 per channel, sizes within 1 pt.
 #
 # usage: test/rex/frame-compare.sh <Raptor.app> <rap> <outdir> [reference-frames-dir]
@@ -78,11 +87,20 @@ within() {
     fi
 }
 
-# Run one theme: $1 name, $2 background.
+# Run one theme: $1 name, $2 background (empty for the default theme), then
+# appearance settings as RAPTOR_*=value.
 shoot() {
     name=$1
     sock=/tmp/raptor-fc-$$-$name.sock
-    printf 'background = %s\nwindow-padding-x = 0\n' "$2" >"$tmp/config"
+    if [ -n "$2" ]; then
+        printf 'background = %s\nwindow-padding-x = 0\n' "$2" >"$tmp/config"
+    else
+        : >"$tmp/config"
+    fi
+    shift 2
+    # Debug builds read GHOSTTY_CONFIG_PATH; release builds the XDG config.
+    mkdir -p "$tmp/xdg-$name/ghostty"
+    cp "$tmp/config" "$tmp/xdg-$name/ghostty/config"
     export RAP_SERVER=$sock
     "$rap" server start >/dev/null
     "$rap" new "fc-$name" -- /bin/sh >/dev/null
@@ -92,7 +110,10 @@ shoot() {
     "$rap" run -s "fc-$name" -- /bin/sh >/dev/null
     "$rap" focus -s "fc-$name" -w 1 >/dev/null
 
-    GHOSTTY_CONFIG_PATH=$tmp/config "$app/Contents/MacOS/raptor" >"$tmp/app-$name.log" 2>&1 &
+    # Let the panes' programs start before the app sizes them.
+    sleep 1
+    env "$@" XDG_CONFIG_HOME="$tmp/xdg-$name" GHOSTTY_CONFIG_PATH="$tmp/config" \
+        "$app/Contents/MacOS/raptor" >"$tmp/app-$name.log" 2>&1 &
     id=
     for _ in $(seq 1 60); do
         id=$("$tmp/win" "fc-$name")
@@ -118,7 +139,11 @@ shoot() {
     rm -f "$sock.lock"
 }
 
-shoot dark 161616
+# T8's chrome: no headers, no islands, opaque.
+t8="RAPTOR_INTERFACE_STYLE=solid RAPTOR_PANE_DENSITY=compact RAPTOR_PANE_HEADERS=0"
+
+# shellcheck disable=SC2086
+shoot dark 161616 $t8
 img=$out/raptor-dark.png
 if [ -f "$img" ]; then
     echo "dark: $(magick identify -format '%wx%h' "$img") px"
@@ -155,7 +180,8 @@ EOF
     near "split divider" "$d" 242424
 fi
 
-shoot light F8F6FB
+# shellcheck disable=SC2086
+shoot light F8F6FB $t8
 img=$out/raptor-light.png
 if [ -f "$img" ]; then
     echo "light: $(magick identify -format '%wx%h' "$img") px"
@@ -177,7 +203,87 @@ if [ -f "$img" ]; then
     within "separator columns" "$cols" 1 2
 fi
 
+# The columns of row $2 whose colour is within 2/255 of $3, as runs "first last".
+runs() {
+    row "$1" "$2" | awk -v want="$3" '
+        function h(s) { return (index("0123456789ABCDEF", substr(s, 1, 1)) - 1) * 16 + index("0123456789ABCDEF", substr(s, 2, 1)) - 1 }
+        function d(a, b) { return a > b ? a - b : b - a }
+        { ok = 1; for (i = 1; i <= 5; i += 2) if (d(h(substr($2, i, 2)), h(substr(want, i, 2))) > 2) ok = 0
+          if (ok) { if (last == "" || $1 != last + 1) { if (first != "") print first, last; first = $1 } last = $1 } }
+        END { if (first != "") print first, last }'
+}
+
+# The rows of column $2 whose colour is within 2/255 of $3, as runs.
+colruns() {
+    magick "$1" -rotate 90 -flop "$tmp/rot.png"
+    runs "$tmp/rot.png" "$2" "$3"
+}
+
+# Islands: cards and the chrome around them.
+islands() {
+    img=$1 chrome=$2 card=$3 border=$4
+    w=$(magick identify -format %w "$img")
+    h=$(magick identify -format %h "$img")
+    # Mid-height, past the window's rounded corners: left card, right cards.
+    runs "$img" 700 "$border" >"$tmp/edges"
+    within "left inset (px at 2x)" "$(sed -n 1p "$tmp/edges" | cut -d' ' -f1)" 2 16
+    right=$(tail -n 1 "$tmp/edges" | cut -d' ' -f2)
+    within "right inset (px at 2x)" $((w - 1 - right)) 2 16
+    l_end=$(sed -n 2p "$tmp/edges" | cut -d' ' -f2)
+    r_start=$(sed -n 3p "$tmp/edges" | cut -d' ' -f1)
+    within "gutter (px at 2x)" $((r_start - l_end - 1)) 2 18
+    near "chrome between cards" "$(px "$img" $(((l_end + r_start) / 2)) 700)" "$chrome"
+    # Down the left card, clear of its header's text and buttons.
+    colruns "$img" 600 "$border" >"$tmp/edges"
+    within "card top (px at 2x)" "$(sed -n 1p "$tmp/edges" | cut -d' ' -f1)" 2 92
+    bottom=$(tail -n 1 "$tmp/edges" | cut -d' ' -f2)
+    within "bottom inset (px at 2x)" $((h - 1 - bottom)) 2 16
+    near "card" "$(px "$img" 600 $((bottom - 40)))" "$card"
+    near "card border" "$(px "$img" 600 92)" "$border"
+    near "chrome above the card" "$(px "$img" 600 86)" "$chrome"
+    # A 10 pt radius leaves the corner's first 5 px diagonal outside the card.
+    near "rounded corner" "$(px "$img" 20 96)" "$chrome"
+    near "header" "$(px "$img" 600 120)" "$card"
+}
+
+# shellcheck disable=SC2086
+shoot islands 131313 RAPTOR_INTERFACE_STYLE=solid RAPTOR_PANE_DENSITY=islands RAPTOR_PANE_HEADERS=1
+img=$out/raptor-islands.png
+if [ -f "$img" ]; then
+    echo "islands: $(magick identify -format '%wx%h' "$img") px"
+    islands "$img" 111111 131313 262626
+fi
+
+shoot compact 0F1518 RAPTOR_INTERFACE_STYLE=solid RAPTOR_PANE_DENSITY=compact RAPTOR_PANE_HEADERS=1
+img=$out/raptor-compact.png
+if [ -f "$img" ]; then
+    echo "compact: $(magick identify -format '%wx%h' "$img") px"
+    v=$(runs "$img" 900 1E2226 | head -n 1 | cut -d' ' -f1)
+    within "vertical divider (px at 2x)" "${v:-0}" 4 1080
+    # The left pane is unfocused: its header is chrome down to the pane.
+    near "unfocused header" "$(px "$img" 600 116)" 0B1212
+    hb=$(colruns "$img" 600 0B1212 | awk '$1 <= 84 && $2 > 100 { print $2 }' | head -n 1)
+    within "header bottom (px at 2x)" "${hb:-0}" 2 149
+    # The focused pane, bottom right, keeps the pane background.
+    hdiv=$(colruns "$img" 1700 1E2226 | awk '$1 > 200 { print $1 }' | head -n 1)
+    near "horizontal divider" "$(px "$img" 1700 "${hdiv:-0}")" 1E2226
+    near "focused header" "$(px "$img" 1700 $((${hdiv:-0} + 34)))" 0F1518
+fi
+
+shoot fresh "" RAPTOR_INTERFACE_STYLE=blended RAPTOR_PANE_DENSITY=islands RAPTOR_PANE_HEADERS=1
+img=$out/raptor-fresh.png
+if [ -f "$img" ]; then
+    echo "fresh: $(magick identify -format '%wx%h' "$img") px"
+    # Ghostty's default background #282C34 gives an island border of #3C4049.
+    runs "$img" 700 3C4049 >"$tmp/edges"
+    within "fresh install has islands" "$(wc -l <"$tmp/edges" | tr -d ' ')" 0 4
+fi
+
 if [ -n "$refs" ]; then
+    magick "$out/raptor-islands.png" -resize 1200x "$refs/v1_4fps_001.jpg" -resize 1200x -append \
+        -quality 85 "$out/side-by-side-islands.jpg"
+    magick "$out/raptor-compact.png" -resize 1200x "$refs/v2_4fps_049.jpg" -resize 1200x -append \
+        -quality 85 "$out/side-by-side-compact.jpg"
     magick "$out/raptor-dark.png" -resize 1200x "$refs/v4_4fps_001.jpg" -resize 1200x -append \
         -quality 85 "$out/side-by-side-dark.jpg"
     magick "$out/raptor-light.png" -crop 2160x120+0+0 -resize 1200x "$refs/acc_on_crop_tabstrip_light.png" -resize 1200x -append \

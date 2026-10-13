@@ -47,6 +47,7 @@ struct TerminalSplitTreeView: View {
 private struct TerminalSplitSubtreeView: View {
     @EnvironmentObject var ghostty: Ghostty.App
     @Environment(\.splitDividerColor) private var dividerColorOverride
+    @Environment(\.splitDividerSize) private var dividerSize
 
     let node: SplitTree<Ghostty.SurfaceView>.Node
     var isRoot: Bool = false
@@ -71,6 +72,7 @@ private struct TerminalSplitSubtreeView: View {
                     action(.resize(.init(node: node, ratio: $0)))
                 }),
                 dividerColor: dividerColorOverride ?? ghostty.config.splitDividerColor,
+                dividerSize: dividerSize,
                 resizeIncrements: .init(width: 1, height: 1),
                 left: {
                     TerminalSplitSubtreeView(node: split.left, action: action)
@@ -94,12 +96,16 @@ private struct TerminalSplitLeaf: View {
 
     @State private var dropState: DropState = .idle
     @State private var isSelfDragging: Bool = false
+    @Environment(\.splitLeafWrapper) private var wrapper
+
+    @ViewBuilder private var surface: some View {
+        let surface = Ghostty.InspectableSurface(surfaceView: surfaceView, isSplit: isSplit)
+        if let wrapper { wrapper(surfaceView, AnyView(surface)) } else { surface }
+    }
 
     var body: some View {
         GeometryReader { geometry in
-            Ghostty.InspectableSurface(
-                surfaceView: surfaceView,
-                isSplit: isSplit)
+            surface
             .background {
                 // If we're dragging ourself, we hide the entire drop zone. This makes
                 // it so that a released drop animates back to its source properly
@@ -266,5 +272,27 @@ extension EnvironmentValues {
     var splitDividerColor: Color? {
         get { self[SplitDividerColorKey.self] }
         set { self[SplitDividerColorKey.self] = newValue }
+    }
+}
+
+private struct SplitDividerSizeKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 1
+}
+
+private struct SplitLeafWrapperKey: EnvironmentKey {
+    static let defaultValue: ((Ghostty.SurfaceView, AnyView) -> AnyView)? = nil
+}
+
+extension EnvironmentValues {
+    /// The visible size of split dividers, which is also the gap between panes.
+    var splitDividerSize: CGFloat {
+        get { self[SplitDividerSizeKey.self] }
+        set { self[SplitDividerSizeKey.self] = newValue }
+    }
+
+    /// Wraps each pane's surface, for example in a card with a header.
+    var splitLeafWrapper: ((Ghostty.SurfaceView, AnyView) -> AnyView)? {
+        get { self[SplitLeafWrapperKey.self] }
+        set { self[SplitLeafWrapperKey.self] = newValue }
     }
 }

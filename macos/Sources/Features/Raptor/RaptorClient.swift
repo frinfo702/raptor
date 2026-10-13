@@ -113,6 +113,10 @@ final class RaptorClient {
         let session: String?
         let block: String?
         let title: String?
+        let pwd: String?
+        let foreground: Foreground?
+
+        struct Foreground: Decodable { let name: String? }
     }
 
     private func handle(_ data: Data) {
@@ -125,6 +129,14 @@ final class RaptorClient {
         case "title_changed":
             if let id = event.session, let block = event.block {
                 controllers[id]?.titleChanged(block: block, to: event.title ?? "")
+            }
+        case "pwd_changed":
+            if let id = event.session, let block = event.block {
+                controllers[id]?.pwdChanged(block: block, to: event.pwd ?? "")
+            }
+        case "process_changed":
+            if let id = event.session, let block = event.block {
+                controllers[id]?.processChanged(block: block, to: event.foreground?.name)
             }
         case "session_view_changed", "session_label_changed":
             if let id = event.session { controllers[id]?.refresh() }
