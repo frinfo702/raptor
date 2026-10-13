@@ -16,7 +16,9 @@ struct RaptorPane: View {
         let islands = appearance.density == .islands
         let tokens = ThemeTokens(background: NSColor(ghostty.config.backgroundColor))
         // The surface draws the terminal background at the configured opacity; the
-        // header matches it so the card reads as one piece.
+        // header matches it so the card reads as one piece. Under glass the surface
+        // draws none, leaving it to the card.
+        let glass = ghostty.config.backgroundBlur.isGlassStyle
         let paneFill = Color(nsColor: NSColor(ghostty.config.backgroundColor))
             .opacity(ghostty.config.backgroundOpacity)
         let focused = controller.focusedPane === surface
@@ -35,6 +37,7 @@ struct RaptorPane: View {
                     .background(islands || focused ? paneFill : .clear)
             }
             content
+                .background(glass ? paneFill : .clear)
         }
         .clipShape(RoundedRectangle(cornerRadius: islands ? Self.islandRadius : 0))
         .overlay {

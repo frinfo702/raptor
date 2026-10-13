@@ -81,3 +81,11 @@ headers. A fresh install is Blended islands with headers. With two panes open,
 switch each setting: the window restyles at once and the panes keep running
 (the XCTest `testAppearanceAppliesLive` checks this). Over a colourful desktop,
 Blended shows it blurred and tinted through the chrome and, faintly, the panes.
+Glass shows it through liquid glass in the chrome just as clearly, even with
+`background-opacity = 0.95` in your own config (that sets the panes only).
+
+## Focus
+
+⌘D, ⌘T, a pane header's split buttons and `$RAP split` from another terminal
+each move the keyboard to the new pane or tab: type straight away and the text
+lands there (the XCTest `testNewPanesTakeFocus` checks this).

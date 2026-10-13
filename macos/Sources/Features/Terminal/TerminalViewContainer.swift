@@ -8,7 +8,7 @@ class TerminalViewContainer: NSView {
 
     /// Background color applied with glass effect
     private(set) var glassEffectView: NSView?
-    private var derivedConfig: DerivedConfig?
+    private(set) var derivedConfig: DerivedConfig?
 
     var windowThemeFrameView: NSView? {
         window?.contentView?.superview
@@ -74,8 +74,14 @@ class TerminalViewContainer: NSView {
         updateGlassEffectTopInsetIfNeeded()
     }
 
-    func ghosttyConfigDidChange(_ config: Ghostty.Config, preferredBackgroundColor: NSColor?) {
-        let newValue = DerivedConfig(config: config, preferredBackgroundColor: preferredBackgroundColor, cornerRadius: windowCornerRadius)
+    /// `glassTint` sets how much of the background colour tints the glass, in place
+    /// of `background-opacity`.
+    func ghosttyConfigDidChange(_ config: Ghostty.Config, preferredBackgroundColor: NSColor?, glassTint: Double? = nil) {
+        let newValue = DerivedConfig(
+            config: config,
+            preferredBackgroundColor: preferredBackgroundColor,
+            glassTint: glassTint,
+            cornerRadius: windowCornerRadius)
         guard newValue != derivedConfig else { return }
         derivedConfig = newValue
 
@@ -246,7 +252,7 @@ extension TerminalViewContainer {
         let backgroundOpacity: Double
         let cornerRadius: CGFloat?
 
-        init?(config: Ghostty.Config, preferredBackgroundColor: NSColor?, cornerRadius: CGFloat?) {
+        init?(config: Ghostty.Config, preferredBackgroundColor: NSColor?, glassTint: Double?, cornerRadius: CGFloat?) {
             switch config.backgroundBlur {
             case .macosGlassRegular:
                 glass = .regular
@@ -256,7 +262,7 @@ extension TerminalViewContainer {
                 return nil
             }
             self.backgroundColor = preferredBackgroundColor ?? NSColor(config.backgroundColor)
-            self.backgroundOpacity = config.backgroundOpacity
+            self.backgroundOpacity = glassTint ?? config.backgroundOpacity
             self.cornerRadius = cornerRadius
         }
     }
