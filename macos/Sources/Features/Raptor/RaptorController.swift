@@ -193,12 +193,14 @@ class RaptorController: BaseTerminalController {
         let switched = activeTab != view.active_window
         activeTab = view.active_window
         let tree = trees[view.active_window] ?? .init()
-        if tree.root != surfaceTree.root || tree.zoomed != surfaceTree.zoomed { surfaceTree = tree }
+        let reshaped = tree.root != surfaceTree.root || tree.zoomed != surfaceTree.zoomed
+        if reshaped { surfaceTree = tree }
 
         // Focus the server's focused block when the tab changes, the server moves focus
-        // (a new split, from here or elsewhere), or focus was lost.
+        // (a new split, from here or elsewhere), or focus was lost. A reshaped tree
+        // counts too: removing a pane leaves the window itself as first responder.
         if let w = view.windows.first(where: { $0.id == view.active_window }),
-           switched || w.focused_block != focusedBefore || focusedSurface.map({ !tree.contains($0) }) ?? true,
+           switched || reshaped || w.focused_block != focusedBefore || focusedSurface.map({ !tree.contains($0) }) ?? true,
            let target = surfaces[w.focused_block] {
             // The header shows it even while the window isn't key.
             focusedPane = target
