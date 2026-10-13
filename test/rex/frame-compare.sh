@@ -269,7 +269,7 @@ if [ -f "$img" ]; then
     near "focused header" "$(px "$img" 1700 $((${hdiv:-0} + 34)))" 0F1518
 fi
 
-shoot fresh ""
+shoot fresh "" RAPTOR_INTERFACE_STYLE=blended RAPTOR_PANE_DENSITY=islands RAPTOR_PANE_HEADERS=1
 img=$out/raptor-fresh.png
 if [ -f "$img" ]; then
     echo "fresh: $(magick identify -format '%wx%h' "$img") px"

@@ -120,7 +120,6 @@ class RaptorController: BaseTerminalController {
 
         struct Window: Decodable {
             let id: String
-            let label: String
             let focused_block: String
             let zoomed: String?
             let layout: Layout
@@ -248,10 +247,9 @@ class RaptorController: BaseTerminalController {
         tabs = view.windows.map { w in
             let focused = blocks[w.focused_block] ?? Block()
             let others = w.blocks.filter { $0.id != w.focused_block }.map { (blocks[$0.id] ?? Block()).program }
-            let title = focused.headerTitle
             return Tab(
                 id: w.id,
-                title: title.isEmpty ? w.label : title,
+                title: focused.headerTitle,
                 program: focused.program,
                 others: others)
         }
