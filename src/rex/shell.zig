@@ -52,14 +52,38 @@ pub const Integration = struct {
             return args;
         return switch (result.command) {
             .direct => |v| v,
-            // Exec runs these through /bin/sh too; exec keeps the shell
-            // the block's own child.
-            .shell => |v| try arena.dupe([:0]const u8, &.{
-                "/bin/sh", "-c", try arena.printSentinel("exec {s}", .{v}, 0),
-            }),
+            .shell => switch (result.shell) {
+                .bash => try bashArgs(arena, args),
+                .nushell => try std.mem.concat(arena, [:0]const u8, &.{
+                    args[0..1], &.{ "--execute", "use ghostty *" }, args[1..],
+                }),
+                .zsh, .elvish, .fish => unreachable,
+            },
         };
     }
 };
+
+/// The arguments setupBash runs bash with: `--posix` added, and the
+/// startup file flags it hands to the integration script dropped.
+fn bashArgs(arena: std.mem.Allocator, args: []const [:0]const u8) ![]const [:0]const u8 {
+    var out: std.ArrayList([:0]const u8) = .empty;
+    try out.appendSlice(arena, &.{ args[0], "--posix" });
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--norc") or std.mem.eql(u8, arg, "--noprofile")) continue;
+        if (std.mem.eql(u8, arg, "--rcfile") or std.mem.eql(u8, arg, "--init-file")) {
+            i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-") or std.mem.eql(u8, arg, "--")) {
+            try out.appendSlice(arena, args[i..]);
+            break;
+        }
+        try out.append(arena, arg);
+    }
+    return out.items;
+}
 
 /// Ghostty's resources directory. A `zig build rap` installs only the
 /// shell integration beside rap, which the usual search does not find.
@@ -103,7 +127,13 @@ test "rex shell: integration decision" {
     const cases = [_]Case{
         // Detected from the program's name, as Ghostty does.
         .{ .integ = .{ .resources_dir = res }, .args = &.{"/usr/local/bin/zsh"}, .zdotdir = true },
-        .{ .integ = .{ .resources_dir = res }, .args = &.{ "bash", "-l" }, .want = &.{ "/bin/sh", "-c", "exec bash --posix -l" } },
+        .{ .integ = .{ .resources_dir = res }, .args = &.{ "bash", "-l" }, .want = &.{ "bash", "--posix", "-l" } },
+        // Its arguments are kept as given, never split by a shell.
+        .{
+            .integ = .{ .resources_dir = res },
+            .args = &.{ "/my bin/bash", "--norc", "--rcfile", "a b", "-O", "extglob", "--", "--norc", "it's $HOME" },
+            .want = &.{ "/my bin/bash", "--posix", "-O", "extglob", "--", "--norc", "it's $HOME" },
+        },
         .{ .integ = .{ .resources_dir = res }, .args = &.{"/bin/sh"} },
         // Bash running a command is never interactive.
         .{ .integ = .{ .resources_dir = res }, .args = &.{ "bash", "-c", "true" } },
