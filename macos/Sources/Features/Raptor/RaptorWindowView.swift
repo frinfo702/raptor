@@ -29,6 +29,7 @@ struct RaptorWindowView: View {
             }
 
             TerminalView(ghostty: ghostty, viewModel: controller, delegate: controller)
+                .environment(\.terminalCommandPalette, false)
                 .environment(\.splitDividerColor, islands ? .clear : Color(nsColor: tokens.hairline))
                 .environment(\.splitDividerSize, islands ? Self.islandGutter : 1)
                 .environment(\.splitLeafWrapper) { surface, content in
@@ -45,16 +46,51 @@ struct RaptorWindowView: View {
                 .padding([.leading, .trailing, .bottom], islands ? Self.islandInset : 0)
         }
         .background(RaptorWindowBackground(style: appearance.effectiveStyle, tokens: tokens))
+        .overlay(alignment: .top) {
+            if controller.commandPaletteIsShowing {
+                RaptorCommandPalette(
+                    isPresented: $controller.commandPaletteIsShowing,
+                    makeCommands: { controller.paletteCommands },
+                    tokens: tokens,
+                    accent: Color(nsColor: RaptorCommandPalette.accent(ghostty.config)))
+                    .padding(.top, Self.paletteTop)
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if controller.sessionPopoverIsShowing {
+                RaptorSessionPopover(controller: controller, isPresented: $controller.sessionPopoverIsShowing, tokens: tokens)
+                    .padding(.leading, 72)
+                    .padding(.top, Self.titlebarHeight + 2)
+            }
+        }
+        .onChange(of: controller.commandPaletteIsShowing || controller.sessionPopoverIsShowing) { showing in
+            // Give the keyboard back to the pane, unless a command already moved it.
+            guard !showing else { return }
+            DispatchQueue.main.async {
+                guard let window = controller.window, !(window.firstResponder is Ghostty.SurfaceView),
+                      let pane = controller.focusedPane else { return }
+                Ghostty.moveFocus(to: pane)
+            }
+        }
         .ignoresSafeArea(.container, edges: .top)
     }
 
+    /// The palette's top edge below the window's, as in Rex: 36 pt under the title bar.
+    static let paletteTop: CGFloat = 76
+
     private func titlebar(_ tokens: ThemeTokens) -> some View {
         HStack(spacing: 0) {
-            // ponytail: inert until the session switcher lands.
-            RaptorTitlebarButton(symbol: "rectangle.stack", help: "Sessions") {}
-                .padding(.trailing, 6)
-            RaptorSessionItem(label: controller.label)
-                .padding(.trailing, 20)
+            RaptorTitlebarButton(symbol: "rectangle.stack", help: "Change Session") {
+                controller.sessionPopoverIsShowing.toggle()
+            }
+            .padding(.trailing, 6)
+            Button { controller.sessionPopoverIsShowing.toggle() } label: {
+                RaptorSessionItem(label: controller.label)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Change Session ⌘K")
+            .padding(.trailing, 20)
             ForEach(Array(controller.tabs.enumerated()), id: \.element.id) { i, tab in
                 let active = tab.id == controller.activeTab
                 // Light themes separate inactive tabs, Safari-style.
@@ -142,7 +178,6 @@ struct RaptorTitlebarButton: View {
     }
 }
 
-// ponytail: inert until the session switcher lands.
 /// The session and the machine it runs on.
 struct RaptorSessionItem: View {
     let label: String

@@ -229,6 +229,8 @@ class AppDelegate: NSObject,
         // Initial config loading
         ghosttyConfigDidChange(config: ghostty.config)
 
+        RaptorController.installMenu()
+
         // Start our update checker.
         updateController.startUpdater()
 
@@ -760,6 +762,11 @@ class AppDelegate: NSObject,
     }
 
     @objc private func ghosttyNewWindow(_ notification: Notification) {
+        if let surface = notification.object as? Ghostty.SurfaceView,
+           let raptor = surface.window?.windowController as? RaptorController {
+            raptor.newWindow()
+            return
+        }
         let configAny = notification.userInfo?[Ghostty.Notification.NewSurfaceConfigKey]
         let config = configAny as? Ghostty.SurfaceConfiguration
         _ = TerminalController.newWindow(ghostty, withBaseConfig: config)
@@ -996,6 +1003,13 @@ class AppDelegate: NSObject,
     }
 
     @IBAction func newWindow(_ sender: Any?) {
+        // Raptor opens another window on the front window's session.
+        if let raptor = NSApp.mainWindow?.windowController as? RaptorController ??
+            NSApp.orderedWindows.lazy.compactMap({ $0.windowController as? RaptorController }).first {
+            raptor.newWindow()
+            return
+        }
+        if RaptorClient.openSessions(ghostty) { return }
         _ = TerminalController.newWindow(ghostty)
     }
 

@@ -14,10 +14,19 @@ final class RaptorClient {
     /// Nil if no server could be reached or started.
     static let shared: RaptorClient? = RaptorClient()
 
+    /// Requests and events.
     let client: rap_client_t
 
-    /// The open session windows by session id.
-    var controllers: [String: RaptorController] = [:]
+    /// The server's socket, nil for the default one.
+    let socket: String?
+
+    /// The open session windows. Several may show one session.
+    private(set) var controllers: [RaptorController] = []
+
+    /// Connections for the windows' panes, one per open window, reused as windows come
+    /// and go. The server makes the client that last focused or typed into a block its
+    /// size owner, so each window needs its own. Never freed: surfaces point into them.
+    private var streams: [rap_client_t] = []
 
     /// Connect to the server on `socket`, else on the default socket, starting it if needed.
     init?(socket: String? = nil) {
@@ -26,6 +35,7 @@ final class RaptorClient {
             return nil
         }
         self.client = client
+        self.socket = socket
         rap_client_set_event_callback(client, { userdata, json in
             guard let userdata, let json else { return }
             let me = Unmanaged<RaptorClient>.fromOpaque(userdata).takeUnretainedValue()
@@ -123,42 +133,62 @@ final class RaptorClient {
         guard let event = try? JSONDecoder().decode(Event.self, from: data) else { return }
         switch event.event {
         case "server_reconnected":
-            controllers.values.forEach { $0.refresh() }
-        case "session_destroyed":
-            if let id = event.session { controllers[id]?.sessionDestroyed() }
-        case "title_changed":
-            if let id = event.session, let block = event.block {
-                controllers[id]?.titleChanged(block: block, to: event.title ?? "")
-            }
-        case "pwd_changed":
-            if let id = event.session, let block = event.block {
-                controllers[id]?.pwdChanged(block: block, to: event.pwd ?? "")
-            }
-        case "process_changed":
-            if let id = event.session, let block = event.block {
-                controllers[id]?.processChanged(block: block, to: event.foreground?.name)
-            }
-        case "session_view_changed", "session_label_changed":
-            if let id = event.session { controllers[id]?.refresh() }
+            controllers.forEach { $0.refresh() }
+            return
         default:
             break
+        }
+        guard let id = event.session else { return }
+        for controller in controllers where controller.session == id {
+            switch event.event {
+            case "session_destroyed":
+                controller.sessionDestroyed()
+            case "title_changed":
+                if let block = event.block { controller.titleChanged(block: block, to: event.title ?? "") }
+            case "pwd_changed":
+                if let block = event.block { controller.pwdChanged(block: block, to: event.pwd ?? "") }
+            case "process_changed":
+                if let block = event.block { controller.processChanged(block: block, to: event.foreground?.name) }
+            case "session_view_changed", "session_label_changed", "window_label_changed":
+                controller.refresh()
+            default:
+                break
+            }
         }
     }
 
     // MARK: Sessions
 
-    private struct SessionList: Decodable {
-        struct Session: Decodable { let id: String }
-        let sessions: [Session]
+    struct SessionSummary: Decodable, Identifiable {
+        let id: String
+        let label: String
     }
 
-    private struct Created: Decodable {
+    private struct SessionList: Decodable {
+        let sessions: [SessionSummary]
+    }
+
+    /// The server's sessions, oldest first.
+    func sessions() -> [SessionSummary] {
+        let list: SessionList? = call("session.list")
+        return list?.sessions ?? []
+    }
+
+    struct Created: Decodable {
         let session: String
+    }
+
+    /// Make a session, named `label` or by the server, in the home directory.
+    func createSession(label: String? = nil) -> String? {
+        var params: [String: Any] = ["cwd": NSHomeDirectory()]
+        if let label { params["label"] = label }
+        let created: Created? = call("session.create", params)
+        return created?.session
     }
 
     private static let attachedKey = "RaptorAttachedSessions"
 
-    /// The sessions that had windows, for reopening on the next launch.
+    /// The session of each window open when the app last quit, for reopening.
     static var attached: [String] {
         get { UserDefaults.standard.stringArray(forKey: attachedKey) ?? [] }
         set { UserDefaults.standard.set(newValue, forKey: attachedKey) }
@@ -174,31 +204,50 @@ final class RaptorClient {
         let existing = list.sessions.map(\.id)
         var ids = attached.filter(existing.contains)
         if ids.isEmpty, let newest = existing.last { ids = [newest] }
-        if ids.isEmpty {
-            let created: Created? = shared.call("session.create", ["cwd": NSHomeDirectory()])
-            if let created { ids = [created.session] }
-        }
-        for id in ids { shared.open(ghostty, session: id) }
+        if ids.isEmpty, let created = shared.createSession() { ids = [created] }
+        attached = []
+        for id in ids { shared.newWindow(ghostty, session: id) }
         return !ids.isEmpty
     }
 
-    /// Show a session in its window, opening one if needed.
+    /// Show a session in a window, opening one if it has none.
     @discardableResult
     func open(_ ghostty: Ghostty.App, session: String) -> RaptorController {
-        if let controller = controllers[session] {
+        if let controller = controllers.first(where: { $0.session == session }) {
             controller.showWindow(nil)
             return controller
         }
-        let controller = RaptorController(ghostty, client: self, session: session)
-        controllers[session] = controller
-        if !Self.attached.contains(session) { Self.attached.append(session) }
+        return newWindow(ghostty, session: session)
+    }
+
+    /// Open another window on a session.
+    @discardableResult
+    func newWindow(_ ghostty: Ghostty.App, session: String) -> RaptorController {
+        let controller = RaptorController(ghostty, client: self, stream: stream(), session: session)
+        controllers.append(controller)
+        Self.attached.append(session)
         controller.showWindow(nil)
         return controller
     }
 
-    /// The session's window closed: it is detached and won't reopen on launch.
+    /// A connection no open window uses.
+    private func stream() -> rap_client_t {
+        let used = controllers.map(\.stream)
+        if let free = streams.first(where: { s in !used.contains(where: { $0 == s }) }) { return free }
+        // ponytail: falls back to sharing the control connection, and so its size ownership.
+        guard let s = rap_client_connect(socket) else { return client }
+        streams.append(s)
+        return s
+    }
+
+    /// A window moved from one session to another.
+    func switched(_ controller: RaptorController, from old: String) {
+        if let i = Self.attached.firstIndex(of: old) { Self.attached[i] = controller.session }
+    }
+
+    /// A window closed: it is detached and won't reopen on launch.
     func closed(_ controller: RaptorController) {
-        controllers[controller.session] = nil
-        Self.attached.removeAll { $0 == controller.session }
+        controllers.removeAll { $0 === controller }
+        if let i = Self.attached.firstIndex(of: controller.session) { Self.attached.remove(at: i) }
     }
 }

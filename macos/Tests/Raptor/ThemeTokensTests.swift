@@ -50,4 +50,11 @@ struct ThemeTokensTests {
         expectNear(t.chrome, 0xFDFBFF)
         expectNear(t.separator, 0xCECCD1)
     }
+
+    /// v3: the command palette and its search field.
+    @Test func darkPalette() {
+        let t = ThemeTokens(background: color(0x232831))
+        expectNear(t.popover, 0x30343F)
+        expectNear(t.field, 0x424752)
+    }
 }

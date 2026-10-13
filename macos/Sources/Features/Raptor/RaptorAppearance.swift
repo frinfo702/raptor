@@ -44,6 +44,23 @@ final class RaptorAppearance: ObservableObject {
         }
     }
 
+    /// Ghostty's window-padding-color: what fills the padding around the cells.
+    enum PaddingColor: String, CaseIterable, Identifiable {
+        case background
+        case extend
+        case extendAlways = "extend-always"
+
+        var id: Self { self }
+
+        var name: String {
+            switch self {
+            case .background: "Background"
+            case .extend: "Extend"
+            case .extendAlways: "Extend Always"
+            }
+        }
+    }
+
     @Published var style: Style {
         didSet {
             save(style.rawValue, Keys.style)
@@ -52,11 +69,26 @@ final class RaptorAppearance: ObservableObject {
     }
     @Published var density: Density { didSet { save(density.rawValue, Keys.density) } }
     @Published var paneHeaders: Bool { didSet { save(paneHeaders, Keys.paneHeaders) } }
+    /// Ghostty's font-thicken.
+    @Published var fontSmoothing: Bool {
+        didSet {
+            save(fontSmoothing, Keys.fontSmoothing)
+            applyConfig()
+        }
+    }
+    @Published var paddingColor: PaddingColor {
+        didSet {
+            save(paddingColor.rawValue, Keys.paddingColor)
+            applyConfig()
+        }
+    }
 
     private enum Keys {
         static let style = "RaptorInterfaceStyle"
         static let density = "RaptorPaneDensity"
         static let paneHeaders = "RaptorPaneHeaders"
+        static let fontSmoothing = "RaptorFontSmoothing"
+        static let paddingColor = "RaptorPaddingColor"
     }
 
     private let defaults: UserDefaults
@@ -69,6 +101,8 @@ final class RaptorAppearance: ObservableObject {
         style = value(Keys.style, "RAPTOR_INTERFACE_STYLE").flatMap(Style.init) ?? .blended
         density = value(Keys.density, "RAPTOR_PANE_DENSITY").flatMap(Density.init) ?? .islands
         paneHeaders = value(Keys.paneHeaders, "RAPTOR_PANE_HEADERS").map { $0 == "1" || $0 == "true" } ?? true
+        fontSmoothing = defaults.bool(forKey: Keys.fontSmoothing)
+        paddingColor = defaults.string(forKey: Keys.paddingColor).flatMap(PaddingColor.init) ?? .background
     }
 
     private func save(_ value: Any, _ key: String) {
@@ -101,6 +135,13 @@ final class RaptorAppearance: ObservableObject {
         var lines = [
             // Rex doesn't dim unfocused panes; their headers darken instead.
             "unfocused-split-opacity = 1",
+            "font-thicken = \(fontSmoothing)",
+            "window-padding-color = \(paddingColor.rawValue)",
+            // Rex's pane chords. ⌘K is the Change Session menu item.
+            "keybind = super+k=unbind",
+            "keybind = super+enter=new_split:auto",
+            "keybind = super+shift+arrow_down=new_split:down",
+            "keybind = super+shift+arrow_right=new_split:right",
         ]
         switch effectiveStyle {
         case .solid:

@@ -1322,7 +1322,9 @@ extension Ghostty {
 
                     // Similar to goto_split (see comment there) about our performability,
                     // we should make this more accurate later.
-                    guard (surfaceView.window?.tabGroup?.windows.count ?? 0) > 1 else { return false }
+                    // Raptor windows draw their own tabs.
+                    guard (surfaceView.window?.tabGroup?.windows.count ?? 0) > 1 ||
+                        surfaceView.window?.windowController is RaptorController else { return false }
 
                     NotificationCenter.default.post(
                         name: Notification.ghosttyGotoTab,

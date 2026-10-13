@@ -71,6 +71,11 @@ GHOSTTY_API bool rap_client_bind(rap_client_t,
 // bound again.
 GHOSTTY_API void rap_client_unbind(rap_client_t, ghostty_surface_t);
 
+// Make the client the size owner of the surface's block, as focusing the
+// surface does. For a surface that kept its focus while another window had
+// the keyboard.
+GHOSTTY_API void rap_client_claim(rap_client_t, ghostty_surface_t);
+
 // A mirror is a headless surface: a terminal with no view, for tools and
 // tests.
 GHOSTTY_API rap_mirror_t rap_mirror_new(void);

@@ -67,9 +67,12 @@ cd macos && xcodebuild test -scheme Ghostty -skip-testing GhosttyUITests \
 ```
 
 `test/rex/frame-compare.sh` checks the title bar, islands and compact panes
-with headers against Rex's reference frames (title bar height, tab pill size,
-island inset, gutter and radius, header colours, theme token colours) and
-writes side-by-side images to its output directory. Run it on a release build
+with headers, the command palette and the session switcher against Rex's
+reference frames (title bar height, tab pill size, island inset, gutter and
+radius, header colours, theme token colours, palette width, position, rows and
+accent row) and writes side-by-side images to its output directory. It needs
+Screen Recording permission for the terminal running it, but not
+Accessibility: it sizes the window through the app's frame autosave. Run it on a release build
 (`zig build -Doptimize=ReleaseFast`): debug builds show a banner above the
 panes that moves them down.
 
@@ -89,3 +92,40 @@ Glass shows it through liquid glass in the chrome just as clearly, even with
 ⌘D, ⌘T, a pane header's split buttons and `$RAP split` from another terminal
 each move the keyboard to the new pane or tab: type straight away and the text
 lands there (the XCTest `testNewPanesTakeFocus` checks this).
+
+## Command palette and sessions
+
+⇧⌘P or the title bar's ⌘ button opens the palette at once, centred under the
+title bar. Type `spl`: only the split commands stay, their matched letters in
+bold and the first row filled with the theme's accent; Enter runs it. Rows
+with a value and › (Change Session, Change Interface Style, Change Terminal
+Padding Color) open a list; Escape goes back, then closes.
+
+The stacked-windows button, the session name or ⌘K opens the session
+switcher: type a name that doesn't exist and Enter (or ⇧⌘N) makes that
+session and shows it in this window. ⌘1–⌘9 pick a session while the switcher
+is open, and a row's context menu renames or closes its session. Outside the
+switcher ⌘1–⌘9 pick a tab, ⇧⌘[ and ⇧⌘] step through tabs, ⌘[ and ⌘] through
+panes, ⌥⌘ and an arrow move to the pane that way, ⇧⌘↓ and ⇧⌘→ split, ⌘↩ splits
+along the pane's longer side and ⇧⌘↩ zooms. ⌘W closes the pane and ⌥⌘W the
+tab, asking first when something besides a shell runs there; ⇧⌘W closes the
+window, which only detaches. Close Session in the palette always asks.
+
+## Two windows on one session
+
+1. With a window open, press ⌘N: a second window opens on the same session,
+   on the same tab.
+2. From another terminal, watch the size owner:
+
+   ```sh
+   $RAP events | grep size_changed
+   ```
+
+3. `$RAP split` from a third terminal: the new pane appears in both windows.
+4. Make the windows different sizes. Click a pane in window A, then the same
+   pane in window B: each click prints `size_changed` with a different
+   `owner` (each window is its own client), and the pane's program redraws
+   at that window's size (`$RAP block call -b <block> size` shows it).
+
+The XCTest `testTwoWindowsOneSession` checks steps 3 and 4.
+
