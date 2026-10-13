@@ -47,7 +47,7 @@ wait_capture() {
   i=0
   until "$RAP" capture -s "$1" | grep -q "$2"; do
     i=$((i + 1))
-    [ $i -lt 100 ] || fail "capture of $1 never showed '$2'"
+    [ $i -lt 100 ] || fail "capture of $1 never showed '$2': $("$RAP" capture -s "$1")"
     sleep 0.05
   done
 }
@@ -197,6 +197,9 @@ expect_status 2 "$RAP" block call -b "$fg_block" list_dir depth=0
 # is marked (OSC 133 A), which drops what a program left working, even
 # one killed with Ctrl-C.
 echo "PS1='zsh> '" >"$tmp/.zshrc"
+# Skip the distro's /etc/zsh/zshrc: Ubuntu's runs compinit, which can stop
+# at an insecure-directories question before the first prompt.
+echo "setopt no_global_rcs" >"$tmp/.zshenv"
 echo "PS1='bash> '" >"$tmp/.bashrc"
 mkdir -p "$tmp/.config/fish"
 echo "function fish_prompt; echo 'fish> '; end" >"$tmp/.config/fish/config.fish"
