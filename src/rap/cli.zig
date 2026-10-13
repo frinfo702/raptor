@@ -31,7 +31,8 @@ pub const usage =
     \\  session inspect [name] Describe a session
     \\  block inspect [block]  Describe a block
     \\  block call <method> [key=value...]
-    \\                         Call a block method (process, list_dir, ...);
+    \\                         Call a block method (process, list_dir,
+    \\                         program_status, ...);
     \\                         values that parse as JSON are sent as JSON
     \\
     \\Server:
