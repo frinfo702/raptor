@@ -30,10 +30,18 @@ struct ThemeTokensTests {
         expectNear(t.hairline, 0x242424)
     }
 
-    // The teal theme's chrome also shifts hue, which a lightness-only token doesn't follow.
+    /// v2: the divider, and the chrome that unfocused compact headers show.
     @Test func darkTeal() {
         let t = ThemeTokens(background: color(0x0F1518))
+        expectNear(t.chrome, 0x0B1212)
         expectNear(t.hairline, 0x1E2226)
+    }
+
+    /// v1 islands: the gutter between cards and the cards' border.
+    @Test func darkIslands() {
+        let t = ThemeTokens(background: color(0x131313))
+        expectNear(t.chrome, 0x111111)
+        expectNear(t.islandBorder, 0x262626)
     }
 
     @Test func light() {

@@ -66,6 +66,18 @@ cd macos && xcodebuild test -scheme Ghostty -skip-testing GhosttyUITests \
     -only-testing GhosttyTests/RaptorSmokeTests
 ```
 
-`test/rex/frame-compare.sh` checks the title bar and splits against Rex's
-reference frames (title bar height, tab pill size, theme token colours) and
-writes side-by-side images to its output directory.
+`test/rex/frame-compare.sh` checks the title bar, islands and compact panes
+with headers against Rex's reference frames (title bar height, tab pill size,
+island inset, gutter and radius, header colours, theme token colours) and
+writes side-by-side images to its output directory. Run it on a release build
+(`zig build -Doptimize=ReleaseFast`): debug builds show a banner above the
+panes that moves them down.
+
+## Appearance
+
+Settings (⌘,) → Appearance has Interface style (Solid, Blended, and Glass on
+macOS 26 and later), Pane density (Comfortable islands or Compact) and Pane
+headers. A fresh install is Blended islands with headers. With two panes open,
+switch each setting: the window restyles at once and the panes keep running
+(the XCTest `testAppearanceAppliesLive` checks this). Over a colourful desktop,
+Blended shows it blurred and tinted through the chrome and, faintly, the panes.

@@ -99,4 +99,53 @@ final class RaptorSmokeTests: XCTestCase {
 
         controller.window?.close()
     }
+
+    /// Settings → Appearance applies to an open window at once, keeping its panes:
+    /// the same surfaces stay bound to the same blocks.
+    @MainActor
+    func testAppearanceAppliesLive() throws {
+        let socket = "/tmp/raptor-xctest-look-\(getpid()).sock"
+        let client = try XCTUnwrap(RaptorClient(socket: socket), "no server started from the bundled rap")
+        let appearance = RaptorAppearance.shared
+        let keys = ["RaptorInterfaceStyle", "RaptorPaneDensity", "RaptorPaneHeaders"]
+        let saved = keys.map { UserDefaults.standard.object(forKey: $0) }
+        let (style, density, headers) = (appearance.style, appearance.density, appearance.paneHeaders)
+        defer {
+            client.call("server.stop")
+            unlink(socket + ".lock")
+            (appearance.style, appearance.density, appearance.paneHeaders) = (style, density, headers)
+            for (key, value) in zip(keys, saved) { UserDefaults.standard.set(value, forKey: key) }
+        }
+        let ghostty = try XCTUnwrap((NSApp.delegate as? AppDelegate)?.ghostty)
+        let created: Created = try XCTUnwrap(client.call("session.create", [
+            "command": ["/bin/sh", "-c", "exec sleep 60"],
+        ]))
+        defer { client.call("session.kill", ["session": created.session]) }
+        let controller = client.open(ghostty, session: created.session)
+        defer { controller.window?.close() }
+        let first = try XCTUnwrap(controller.surfaceTree.first)
+        _ = controller.newSplit(at: first, direction: .right)
+
+        func settle(until done: () -> Bool = { false }) {
+            let deadline = Date().addingTimeInterval(5)
+            repeat { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } while !done() && Date() < deadline
+        }
+        settle { Array(controller.surfaceTree).count == 2 }
+        let panes = Array(controller.surfaceTree)
+        XCTAssertEqual(panes.count, 2)
+
+        for s in RaptorAppearance.Style.allCases {
+            for d in RaptorAppearance.Density.allCases {
+                for h in [true, false] {
+                    (appearance.style, appearance.density, appearance.paneHeaders) = (s, d, h)
+                    settle { controller.window?.isOpaque == (appearance.effectiveStyle == .solid) }
+                    let what = "\(s) \(d) headers \(h)"
+                    XCTAssertEqual(controller.window?.isOpaque, appearance.effectiveStyle == .solid, what)
+                    XCTAssertEqual(Array(controller.surfaceTree), panes, "\(what) replaced a pane")
+                    XCTAssertTrue(panes.allSatisfy { $0.window === controller.window }, "\(what) took a pane off screen")
+                    XCTAssertTrue(panes.allSatisfy { controller.block(of: $0) != nil }, "\(what) unbound a pane")
+                }
+            }
+        }
+    }
 }

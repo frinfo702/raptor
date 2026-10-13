@@ -12,17 +12,20 @@ struct ThemeTokens {
     let hairline: NSColor
     /// Separators between inactive tabs on light themes.
     let separator: NSColor
+    /// The border around island cards.
+    let islandBorder: NSColor
     let isLight: Bool
 
-    // Popover, field and border tokens come with the UI that uses them.
+    // Popover and field tokens come with the UI that uses them.
     init(background: NSColor) {
         isLight = background.isLightColor
         let lab = OKLab(background)
         let s = isLight ? -1.0 : 1.0
-        chrome = lab.shifted(-0.014 * s)
+        chrome = lab.shifted(-0.016 * s)
         tabActive = lab.shifted(0.03 * s)
         hairline = lab.shifted(0.06 * s)
         separator = lab.shifted(0.13 * s)
+        islandBorder = lab.shifted(0.08 * s)
     }
 }
 

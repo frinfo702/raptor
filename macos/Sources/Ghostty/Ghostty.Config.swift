@@ -64,6 +64,11 @@ extension Ghostty {
                 return nil
             }
 
+            // Raptor's appearance settings come first so the user's config can override them.
+            if let raptor = RaptorAppearance.shared.configPath {
+                ghostty_config_load_file(cfg, raptor)
+            }
+
             // Load our configuration from files, CLI args, and then any referenced files.
             if let path {
                 ghostty_config_load_file(cfg, path)

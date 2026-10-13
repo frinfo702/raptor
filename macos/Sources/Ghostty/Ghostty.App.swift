@@ -122,9 +122,8 @@ extension Ghostty {
         }
 
         private static func openConfig(_ app: ghostty_app_t) {
-            guard let app_ud = ghostty_app_userdata(app) else { return }
-            let app = Unmanaged<App>.fromOpaque(app_ud).takeUnretainedValue()
-            app.openConfig()
+            // Raptor's settings window links to the config file.
+            RaptorSettings.show()
         }
 
         func openConfig() {

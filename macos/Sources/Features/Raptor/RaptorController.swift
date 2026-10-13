@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import GhosttyKit
 
@@ -23,6 +24,20 @@ class RaptorController: BaseTerminalController {
     struct Tab: Identifiable, Equatable {
         let id: String
         let title: String
+        /// The focused pane's program, then the others'.
+        let program: RaptorProgram
+        let others: [RaptorProgram]
+    }
+
+    /// What a pane's header shows about its block.
+    struct Block: Equatable {
+        var title = ""
+        var pwd = ""
+        /// The foreground process's name, nil until known.
+        var process: String?
+
+        var program: RaptorProgram { RaptorProgram.identify(process) ?? .shell }
+        var headerTitle: String { RaptorProgram.title(process: process, terminalTitle: title, pwd: pwd) }
     }
 
     /// Every block's surface, kept across tab switches.
@@ -31,8 +46,13 @@ class RaptorController: BaseTerminalController {
     /// The last view the server sent.
     private var view: SessionView?
 
-    /// Block titles, from the view and title_changed events.
-    private var titles: [String: String] = [:]
+    /// Blocks by id, from the view and the server's events.
+    @Published private(set) var blocks: [String: Block] = [:]
+
+    /// The pane last focused, whose header is drawn as focused.
+    @Published private(set) var focusedPane: Ghostty.SurfaceView?
+
+    private var styleObservers: Set<AnyCancellable> = []
 
     init(_ ghostty: Ghostty.App, client: RaptorClient, session: String) {
         self.client = client
@@ -49,24 +69,42 @@ class RaptorController: BaseTerminalController {
         window.isRestorable = false
         // The tab strip is the title bar, tinted from the terminal background. An empty
         // toolbar centres the traffic lights in a taller title bar.
-        let tokens = ThemeTokens(background: NSColor(ghostty.config.backgroundColor))
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.toolbar = NSToolbar(identifier: "Raptor")
         window.toolbarStyle = .unifiedCompact
-        window.backgroundColor = tokens.chrome
-        window.appearance = NSAppearance(named: tokens.isLight ? .aqua : .darkAqua)
         window.center()
         window.setFrameAutosaveName("Raptor \(session)")
         window.delegate = self
-        window.contentView = NSHostingView(rootView: RaptorWindowView(
-            ghostty: ghostty,
-            controller: self,
-            tokens: tokens))
+        // The container draws Glass behind the views when the config asks for it.
+        window.contentView = TerminalViewContainer {
+            RaptorWindowView(ghostty: ghostty, controller: self, appearance: .shared)
+        }
         self.window = window
         windowDidLoad()
 
+        // Restyle the window when the theme or interface style changes. Both publish
+        // before they change, so look again on the next turn of the run loop.
+        Publishers.Merge(
+            ghostty.$config.map { _ in () },
+            RaptorAppearance.shared.objectWillChange.map { _ in () })
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.applyStyle() }
+            .store(in: &styleObservers)
+        applyStyle()
+
         refresh()
+    }
+
+    /// Make the window opaque for Solid, see-through for Blended and Glass.
+    private func applyStyle() {
+        guard let window else { return }
+        let tokens = ThemeTokens(background: NSColor(ghostty.config.backgroundColor))
+        let solid = RaptorAppearance.shared.effectiveStyle == .solid
+        window.appearance = NSAppearance(named: tokens.isLight ? .aqua : .darkAqua)
+        window.isOpaque = solid
+        window.backgroundColor = solid ? tokens.chrome : .clear
+        terminalViewContainer?.ghosttyConfigDidChange(ghostty.config, preferredBackgroundColor: tokens.chrome)
     }
 
     required init?(coder: NSCoder) {
@@ -92,6 +130,7 @@ class RaptorController: BaseTerminalController {
         struct Block: Decodable {
             let id: String
             let title: String
+            let pwd: String?
         }
     }
 
@@ -126,7 +165,13 @@ class RaptorController: BaseTerminalController {
         var seen: Set<String> = []
         var trees: [String: SplitTree<Ghostty.SurfaceView>] = [:]
         for w in view.windows {
-            for b in w.blocks { titles[b.id] = b.title }
+            for b in w.blocks {
+                var block = blocks[b.id] ?? Block()
+                block.title = b.title
+                block.pwd = Self.path(b.pwd ?? "")
+                if block.process == nil { block.process = foregroundName(b.id) }
+                if blocks[b.id] != block { blocks[b.id] = block }
+            }
             let root = node(w.layout, seen: &seen)
             let zoomed = w.zoomed.flatMap { surfaces[$0] }.flatMap { root?.node(view: $0) }
             trees[w.id] = SplitTree(root: root, zoomed: zoomed)
@@ -136,8 +181,8 @@ class RaptorController: BaseTerminalController {
         for (id, surface) in surfaces where !seen.contains(id) {
             if let s = surface.surface { rap_client_unbind(client.client, s) }
             surfaces[id] = nil
-            titles[id] = nil
         }
+        for id in blocks.keys where !seen.contains(id) { blocks[id] = nil }
 
         updateTabs()
         let switched = activeTab != view.active_window
@@ -149,6 +194,8 @@ class RaptorController: BaseTerminalController {
         if switched || focusedSurface.map({ !tree.contains($0) }) ?? true,
            let w = view.windows.first(where: { $0.id == view.active_window }),
            let target = surfaces[w.focused_block] {
+            // The header shows it even while the window isn't key.
+            focusedPane = target
             DispatchQueue.main.async { Ghostty.moveFocus(to: target) }
         }
     }
@@ -199,17 +246,53 @@ class RaptorController: BaseTerminalController {
     private func updateTabs() {
         guard let view else { return }
         tabs = view.windows.map { w in
-            let title = titles[w.focused_block] ?? ""
-            return Tab(id: w.id, title: title.isEmpty ? w.label : title)
+            let focused = blocks[w.focused_block] ?? Block()
+            let others = w.blocks.filter { $0.id != w.focused_block }.map { (blocks[$0.id] ?? Block()).program }
+            let title = focused.headerTitle
+            return Tab(
+                id: w.id,
+                title: title.isEmpty ? w.label : title,
+                program: focused.program,
+                others: others)
         }
     }
+
+    /// The block shown by a surface.
+    func block(of surface: Ghostty.SurfaceView) -> String? {
+        surfaces.first(where: { $0.value === surface })?.key
+    }
+
+    /// True if the active tab has a single pane.
+    var isSinglePane: Bool { !surfaceTree.isSplit }
 
     // MARK: Events
 
     func titleChanged(block: String, to title: String) {
-        guard titles[block] != nil else { return }
-        titles[block] = title
+        guard blocks[block] != nil else { return }
+        blocks[block]?.title = title
         updateTabs()
+    }
+
+    func pwdChanged(block: String, to pwd: String) {
+        guard blocks[block] != nil else { return }
+        blocks[block]?.pwd = Self.path(pwd)
+        updateTabs()
+    }
+
+    func processChanged(block: String, to name: String?) {
+        guard blocks[block] != nil else { return }
+        blocks[block]?.process = name
+        updateTabs()
+    }
+
+    /// Shells report their directory as a file URL (OSC 7); headers show its path.
+    private static func path(_ pwd: String) -> String {
+        pwd.hasPrefix("file://") ? URL(string: pwd)?.path ?? pwd : pwd
+    }
+
+    override func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
+        super.focusedSurfaceDidChange(to: to)
+        if let to, to !== focusedPane { focusedPane = to }
     }
 
     /// The session ended, so there is nothing left to show.
@@ -221,6 +304,20 @@ class RaptorController: BaseTerminalController {
 
     func newTab() {
         client.call("session.new_window", ["session": session])
+    }
+
+    func split(_ surface: Ghostty.SurfaceView, _ direction: SplitTree<Ghostty.SurfaceView>.NewDirection) {
+        _ = newSplit(at: surface, direction: direction)
+    }
+
+    func zoom(_ surface: Ghostty.SurfaceView) {
+        guard let block = block(of: surface) else { return }
+        client.call("session.zoom_block", ["session": session, "block": block])
+    }
+
+    func close(_ surface: Ghostty.SurfaceView) {
+        guard let node = surfaceTree.root?.node(view: surface) else { return }
+        closeSurface(node)
     }
 
     func selectTab(_ id: String) {
@@ -260,12 +357,19 @@ class RaptorController: BaseTerminalController {
     }
 
     private struct BlockProcess: Decodable {
-        struct Foreground: Decodable { let pid: Int }
+        struct Foreground: Decodable {
+            let pid: Int
+            let name: String?
+        }
         let pid: Int
         let foreground: Foreground?
     }
 
-    private static let shells: Set<String> = ["sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "xonsh"]
+    /// The name of the block's foreground program, asked of the server.
+    private func foregroundName(_ block: String) -> String? {
+        let p: BlockProcess? = client.call("block.method", ["block": block, "method": "process"])
+        return p?.foreground?.name
+    }
 
     // ponytail: reads the process name locally, which holds while the server is on this Mac.
     /// True if the block's foreground program is something other than a shell.
@@ -274,7 +378,7 @@ class RaptorController: BaseTerminalController {
         var name = [CChar](repeating: 0, count: 256)
         // proc_name fails (EPERM) for setuid programs such as top or sudo; shells are never setuid.
         guard proc_name(Int32(p.foreground?.pid ?? p.pid), &name, UInt32(name.count)) > 0 else { return true }
-        return !Self.shells.contains(String(cString: name))
+        return !RaptorProgram.shells.contains(String(cString: name))
     }
 
     /// Run `kill`, after asking first if any of the blocks runs something besides a shell.
@@ -298,149 +402,5 @@ class RaptorController: BaseTerminalController {
         surfaces = [:]
         surfaceTree = .init()
         client.closed(self)
-    }
-}
-
-/// The title bar, holding the session item and the tab strip, above the active tab's splits.
-struct RaptorWindowView: View {
-    @ObservedObject var ghostty: Ghostty.App
-    @ObservedObject var controller: RaptorController
-    let tokens: ThemeTokens
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 0) {
-                RaptorSessionItem(label: controller.label)
-                    .padding(.trailing, 20)
-                ForEach(Array(controller.tabs.enumerated()), id: \.element.id) { i, tab in
-                    let active = tab.id == controller.activeTab
-                    // Light themes separate inactive tabs, Safari-style.
-                    if i > 0 && tokens.isLight {
-                        let prevActive = controller.tabs[i - 1].id == controller.activeTab
-                        Rectangle()
-                            .fill(Color(nsColor: tokens.separator))
-                            .frame(width: 1, height: 16)
-                            .opacity(active || prevActive ? 0 : 1)
-                    }
-                    RaptorTabView(
-                        tab: tab,
-                        active: active,
-                        tokens: tokens,
-                        select: { controller.selectTab(tab.id) },
-                        close: { controller.closeTab(tab.id) })
-                }
-                Spacer(minLength: 8)
-                Button(action: controller.newTab) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 24, height: 24)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help("New Tab")
-            }
-            // The session item sits 40 pt right of the green traffic light's centre.
-            .padding(.leading, 104)
-            .padding(.trailing, 14)
-            .frame(height: Self.titlebarHeight)
-            .background(Color(nsColor: tokens.chrome))
-
-            Rectangle()
-                .fill(Color(nsColor: tokens.hairline))
-                .frame(height: 1)
-
-            TerminalView(ghostty: ghostty, viewModel: controller, delegate: controller)
-                .environment(\.splitDividerColor, Color(nsColor: tokens.hairline))
-        }
-        .ignoresSafeArea(.container, edges: .top)
-    }
-
-    static let titlebarHeight: CGFloat = 40
-}
-
-// ponytail: inert until the session switcher lands.
-/// The session and the machine it runs on.
-struct RaptorSessionItem: View {
-    let label: String
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "laptopcomputer")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(label)
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                Text("This Mac")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-struct RaptorTabView: View {
-    let tab: RaptorController.Tab
-    let active: Bool
-    let tokens: ThemeTokens
-    let select: () -> Void
-    let close: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Text(">_")
-                .font(.system(size: 8, weight: .heavy, design: .monospaced))
-                .foregroundStyle(Color(red: 0.55, green: 0.85, blue: 0.5))
-                .frame(width: 18, height: 18)
-                .background(RoundedRectangle(cornerRadius: 5).fill(Color(red: 0x3B / 255, green: 0x5C / 255, blue: 0x3E / 255)))
-            // Long titles fade out instead of ending in an ellipsis.
-            Text(tab.title)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(active ? .primary : .secondary)
-                .lineLimit(1)
-                .fixedSize()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .clipped()
-                .mask(HStack(spacing: 0) {
-                    Rectangle()
-                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
-                        .frame(width: 24)
-                })
-            if hovering {
-                Button(action: close) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Close Tab")
-            }
-        }
-        .padding(.leading, 5)
-        .padding(.trailing, 10)
-        .frame(minWidth: 80, maxWidth: 220, minHeight: 27, maxHeight: 27)
-        .background(pill)
-        .contentShape(Capsule())
-        .onHover { hovering = $0 }
-        .onTapGesture(perform: select)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(tab.title)
-        .accessibilityAddTraits(active ? [.isButton, .isSelected] : .isButton)
-        .accessibilityAction(.default, select)
-        .accessibilityAction(named: "Close Tab", close)
-    }
-
-    /// Dark themes lift the active tab; light themes draw it as chrome with a border.
-    @ViewBuilder private var pill: some View {
-        if active {
-            Capsule()
-                .fill(Color(nsColor: tokens.isLight ? tokens.chrome : tokens.tabActive))
-                .overlay(Capsule().strokeBorder(Color(nsColor: tokens.isLight ? tokens.separator : .clear)))
-        }
     }
 }
