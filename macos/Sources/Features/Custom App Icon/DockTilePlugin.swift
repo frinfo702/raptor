@@ -55,7 +55,7 @@ class DockTilePlugin: NSObject, NSDockTilePlugIn {
             // Use the `Blueprint` icon to distinguish Debug from Release builds.
             appIcon = pluginBundle.image(forResource: "BlueprintImage")!
             #else
-            // Reset to Ghostty.icon
+            // Reset to Raptor.icon
             appIcon = nil
             #endif
         } else {
