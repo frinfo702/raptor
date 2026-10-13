@@ -973,8 +973,8 @@ const Removal = union(enum) {
     /// The record and every record beneath it.
     subtree: []const u8,
     exact: []const u8,
-    /// Working and blocked records, which end with the process or at the
-    /// next prompt.
+    /// Working and blocked records, which end when the block's child exits
+    /// or a new OSC 133 A prompt begins.
     live,
 };
 
