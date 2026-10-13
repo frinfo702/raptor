@@ -12,7 +12,7 @@ tmp=$(mktemp -d "${TMPDIR:-/tmp}/rap-e2e.XXXXXX")
 export RAP_SERVER="$tmp/s.sock"
 # Keep the server log out of the real home.
 export HOME="$tmp"
-unset XDG_STATE_HOME RAP_SESSION RAP_BLOCK RAP_AUTOSTART
+unset XDG_STATE_HOME XDG_CONFIG_HOME RAP_SESSION RAP_BLOCK RAP_AUTOSTART
 
 # A socket directly in /tmp, which other users can write to.
 shared_sock=/tmp/rap-e2e-$$.sock
@@ -47,7 +47,7 @@ wait_capture() {
   i=0
   until "$RAP" capture -s "$1" | grep -q "$2"; do
     i=$((i + 1))
-    [ $i -lt 100 ] || fail "capture of $1 never showed '$2'"
+    [ $i -lt 100 ] || fail "capture of $1 never showed '$2': $("$RAP" capture -s "$1")"
     sleep 0.05
   done
 }
@@ -192,6 +192,73 @@ expect_status 2 "$RAP" block call -b "$fg_block" list_dir oops
 expect_status 2 "$RAP" block call -b "$fg_block" list_dir path=2024
 expect_status 2 "$RAP" block call -b "$fg_block" list_dir depth=0
 "$RAP" close -b "$fg_block"
+
+# Shells the server starts get Ghostty's shell integration: every prompt
+# is marked (OSC 133 A), which drops what a program left working, even
+# one killed with Ctrl-C.
+echo "PS1='zsh> '" >"$tmp/.zshrc"
+# Skip the distro's /etc/zsh/zshrc: Ubuntu's runs compinit, which can stop
+# at an insecure-directories question before the first prompt.
+echo "setopt no_global_rcs" >"$tmp/.zshenv"
+echo "PS1='bash> '" >"$tmp/.bashrc"
+mkdir -p "$tmp/.config/fish"
+echo "function fish_prompt; echo 'fish> '; end" >"$tmp/.config/fish/config.fish"
+cat >"$tmp/mark.sh" <<'EOF'
+printf '\033]7501;state=working:id=%s\033\\' "$1"
+case $1 in *-job) exec sleep 30 ;; esac
+EOF
+wait_event() {
+  i=0
+  until grep -q "$1" "$tmp/events"; do
+    i=$((i + 1))
+    [ $i -lt 100 ] || fail "$2: $(grep program_status "$tmp/events")"
+    sleep 0.05
+  done
+}
+"$RAP" events >"$tmp/events" &
+events=$!
+sleep 0.3
+for sh in zsh bash fish; do
+  sh_path=$(command -v $sh) || {
+    [ $sh = fish ] || fail "$sh is not installed"
+    echo "e2e: no fish, skipping its shell integration" >&2
+    continue
+  }
+  # Apple's bash 3.2 can't be injected, in Ghostty either.
+  if [ "$sh_path" = /bin/bash ] && [ "$(uname)" = Darwin ]; then
+    echo "e2e: only Apple's bash, skipping its shell integration" >&2
+    continue
+  fi
+  "$RAP" new "si-$sh" -- "$sh_path" >/dev/null
+  wait_capture "si-$sh" "$sh> "
+  for id in "$sh-1" "$sh-2"; do
+    "$RAP" send -s "si-$sh" "sh $tmp/mark.sh $id\n"
+    wait_event "\"ids\":\[\"$id\"\],\"reason\":\"prompt\"" "no $sh prompt after $id"
+  done
+  "$RAP" send -s "si-$sh" "sh $tmp/mark.sh $sh-job\n"
+  i=0
+  until "$RAP" block call -s "si-$sh" program_status | grep -q "\"id\":\"$sh-job\",\"state\":\"working\""; do
+    i=$((i + 1))
+    [ $i -lt 100 ] || fail "$sh-job never showed working"
+    sleep 0.05
+  done
+  "$RAP" send-key -s "si-$sh" C-c
+  wait_event "\"ids\":\[\"$sh-job\"\],\"reason\":\"prompt\"" "$sh kept $sh-job working after Ctrl-C"
+  "$RAP" kill "si-$sh"
+done
+kill $events 2>/dev/null || true
+wait $events 2>/dev/null || true
+
+# shell-integration = none in the Ghostty config turns it off.
+"$RAP" server stop
+mkdir -p "$tmp/.config/ghostty"
+echo "shell-integration = none" >"$tmp/.config/ghostty/config"
+"$RAP" new si-none -- "$(command -v zsh)" >/dev/null
+wait_capture si-none "zsh> "
+"$RAP" send -s si-none 'echo "integ=[${+_ghostty_state}]"\n'
+wait_capture si-none 'integ=\[0\]'
+"$RAP" kill si-none
+rm "$tmp/.config/ghostty/config"
 
 # Stopping removes the socket, and without autostart nothing answers.
 "$RAP" server stop

@@ -45,5 +45,9 @@ jobs:
       - name: Build rap
         run: zig build rap -Dapp-runtime=none -Dfont-backend=freetype
 
+      # The e2e checks the shell integration of these shells and bash.
+      - name: Install shells
+        run: sudo apt-get update && sudo apt-get install -y zsh fish
+
       - name: rap e2e
         run: test/rex/e2e.sh zig-out/bin/rap
