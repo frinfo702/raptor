@@ -272,10 +272,8 @@ class RaptorController: BaseTerminalController {
     private func isBusy(_ block: String) -> Bool {
         guard let p: BlockProcess = client.call("block.method", ["block": block, "method": "process"]) else { return false }
         var name = [CChar](repeating: 0, count: 256)
-        guard proc_name(Int32(p.foreground?.pid ?? p.pid), &name, UInt32(name.count)) > 0 else {
-            // proc_name fails (EPERM) for setuid programs such as top or sudo.
-            return p.foreground.map { $0.pid != p.pid } ?? false
-        }
+        // proc_name fails (EPERM) for setuid programs such as top or sudo; shells are never setuid.
+        guard proc_name(Int32(p.foreground?.pid ?? p.pid), &name, UInt32(name.count)) > 0 else { return true }
         return !Self.shells.contains(String(cString: name))
     }
 
