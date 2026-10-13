@@ -14,7 +14,8 @@
 #   compact (bg #0F1518, vs v2_4fps_049.jpg; Solid, compact, headers):
 #         divider #1E2226, 34 pt headers, #0B1212 when unfocused, the pane
 #         background when focused;
-#   fresh (default theme, no appearance settings): islands with headers.
+#   fresh (default theme; Blended, islands, headers pinned to the default
+#         values so saved Settings can't leak in): islands with headers.
 # Colours must be within 2/255 per channel, sizes within 1 pt.
 #
 # usage: test/rex/frame-compare.sh <Raptor.app> <rap> <outdir> [reference-frames-dir]
