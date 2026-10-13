@@ -1,21 +1,26 @@
 #!/usr/bin/env bash
 # Build Raptor.app, ad-hoc sign it, and package it as a DMG.
 #
-#   dist/macos/raptor-dmg.sh <version> [zig command...]
+#   dist/macos/raptor-dmg.sh <raptor-vX.Y.Z tag> [zig command...]
 #
-# Writes Raptor-<version>.dmg to the repository root and prints its path.
+# Writes Raptor-X.Y.Z.dmg to the repository root and prints its path.
 # The zig command defaults to `zig`; locally use `direnv exec . zig`.
 set -euo pipefail
 
-version="${1:?usage: raptor-dmg.sh <version> [zig command...]}"
+tag="${1:?usage: raptor-dmg.sh <raptor-vX.Y.Z tag> [zig command...]}"
 shift
+[[ "$tag" =~ ^raptor-v([0-9]+\.[0-9]+\.[0-9]+)$ ]] ||
+  { echo "error: tag '$tag' is not in raptor-vX.Y.Z format" >&2; exit 1; }
+version="${BASH_REMATCH[1]}"
 zig=("$@")
 [ ${#zig[@]} -gt 0 ] || zig=(zig)
 
 cd "$(dirname "$0")/../.."
 # Native (arm64 on Apple silicon) because the bundled rap is built for
 # the host only; a universal app would ship an arm64-only rap.
-"${zig[@]}" build -Doptimize=ReleaseFast -Dxcframework-target=native
+# An explicit version skips git tag detection, which rejects raptor-v* tags.
+"${zig[@]}" build -Doptimize=ReleaseFast -Dxcframework-target=native \
+  -Dversion-string="$version"
 
 app=zig-out/Raptor.app
 [ -x "$app/Contents/MacOS/rap" ] || { echo "error: $app has no bundled rap" >&2; exit 1; }
