@@ -12,6 +12,11 @@ APP=macos/build/Debug/Raptor.app
 RAP=zig-out/bin/rap          # panes don't have rap on PATH yet
 ```
 
+Rebuild after every checkout: an older `$APP` runs older code, and the
+server keeps running whichever `rap` started it (`$RAP server stop` first).
+The script needs `htop` and `nvim` on your PATH (`brew install htop neovim`);
+`rap run` refuses a program it can't find.
+
 Start with no server running (`$RAP ls` exits 4), or note which sessions
 already exist.
 

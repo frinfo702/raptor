@@ -8,6 +8,7 @@ const Writer = std.Io.Writer;
 const protocol = @import("../rex/protocol.zig");
 const Client = @import("../rex/Client.zig");
 const ExitCode = @import("exit.zig").Code;
+const os_path = @import("../os/path.zig");
 
 pub const usage =
     \\Usage: rap [flags] <command> [args] [-- command...]
@@ -162,6 +163,17 @@ const Ctx = struct {
             try self.err.writeAll(usage);
             return .usage;
         }
+        // The server execs the command, and a pane whose program can't start closes
+        // at once. Look it up here, on the caller's PATH, so a typo is an error.
+        if (self.args.command) |command| if (command.len > 0) {
+            const exe = try os_path.expand(self.io, self.alloc, self.env, command[0]) orelse {
+                try self.err.print("rap: {s}: command not found\n", .{command[0]});
+                return exitStatus(127);
+            };
+            const resolved = try self.alloc.dupe([]const u8, command);
+            resolved[0] = exe;
+            self.args.command = resolved;
+        };
         const cmd = words[0];
         const Cmd = enum {
             ls,
