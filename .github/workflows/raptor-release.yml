@@ -37,7 +37,10 @@ jobs:
         run: xcodebuild -version
 
       - name: Build DMG
-        run: echo "DMG=$(dist/macos/raptor-dmg.sh "$TAG")" >> "$GITHUB_ENV"
+        run: |
+          set -euo pipefail
+          dist/macos/raptor-dmg.sh "$TAG"
+          echo "DMG=Raptor-${TAG#raptor-v}.dmg" >> "$GITHUB_ENV"
 
       - name: Upload DMG
         run: gh release upload "$TAG" "$DMG" --clobber --repo "$GITHUB_REPOSITORY"
