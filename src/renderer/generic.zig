@@ -15,6 +15,7 @@ const Surface = @import("../Surface.zig");
 const link = @import("link.zig");
 const cellpkg = @import("cell.zig");
 const noMinContrast = cellpkg.noMinContrast;
+const rex_acc = @import("../rex/acc.zig");
 const constraintWidth = cellpkg.constraintWidth;
 const isCovering = cellpkg.isCovering;
 const rowNeverExtendBg = @import("row.zig").neverExtendBg;
@@ -114,6 +115,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         /// The configuration we need derived from the main config.
         config: DerivedConfig,
+
+        /// Raptor's Automatic Contrast Correction for text glyphs.
+        acc: rex_acc.Acc = undefined,
+        acc_enabled: bool = false,
+        /// Set by toggle_contrast_correction; wins over the config.
+        acc_override: ?bool = null,
 
         /// The mailbox for communicating with the window.
         surface_mailbox: apprt.surface.Mailbox,
@@ -594,6 +601,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             bold_color: ?terminal.Style.BoldColor,
             faint_opacity: u8,
             min_contrast: f32,
+            contrast_correction: configpkg.Config.ContrastCorrection,
+            palette: terminal.color.Palette,
             padding_color: configpkg.WindowPaddingColor,
             custom_shaders: configpkg.RepeatablePath,
             bg_image: ?configpkg.Path,
@@ -661,6 +670,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .faint_opacity = @intFromFloat(@ceil(config.@"faint-opacity" * 255)),
 
                     .min_contrast = @floatCast(config.@"minimum-contrast"),
+                    .contrast_correction = config.@"contrast-correction",
+                    .palette = config.palette.value,
                     .padding_color = config.@"window-padding-color",
 
                     .selection_background = config.@"selection-background",
@@ -819,6 +830,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             result.updateScreenSizeUniforms();
             result.updateBgImageBuffer();
             try result.prepBackgroundImage();
+            result.resetAcc();
 
             return result;
         }
@@ -1058,6 +1070,33 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             draw_now.notify() catch |err| {
                 log.err("error notifying draw_now err={}", .{err});
             };
+        }
+
+        /// Flip Raptor's contrast correction for this surface.
+        pub fn toggleContrastCorrection(self: *Self) void {
+            self.draw_mutex.lockUncancelable(global.io());
+            defer self.draw_mutex.unlock(global.io());
+            self.acc_override = !self.acc_enabled;
+            self.resetAcc();
+            self.markDirty();
+        }
+
+        /// Rebuild the contrast corrector for the current theme, which
+        /// also flushes its cache.
+        fn resetAcc(self: *Self) void {
+            self.acc = .init(self.config.background, self.config.foreground, &self.config.palette);
+            self.acc_enabled = self.acc_override orelse switch (self.config.contrast_correction) {
+                .on => true,
+                .off => false,
+                .auto => rex_acc.isLight(self.config.background),
+            };
+        }
+
+        /// The corrected color for text drawn on `bg`, pre-blended when
+        /// faint so it can be drawn opaque.
+        fn accText(self: *Self, color: terminal.color.RGB, bg: terminal.color.RGB, faint: bool) terminal.color.RGB {
+            const c = if (faint) rex_acc.blend(color, bg, self.config.faint_opacity) else color;
+            return self.acc.get(c, bg);
         }
 
         /// Mark the full screen as dirty so that we redraw everything.
@@ -2195,6 +2234,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Reset our viewport to force a rebuild, in case of a font change.
             self.markDirty();
+            self.resetAcc();
 
             const blending_changed = old_blending != config.blending;
 
@@ -3157,8 +3197,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     };
                 };
 
+                // Text glyphs get contrast correction against the cell's
+                // own background; graphics glyphs keep their colors.
+                // Faint text is blended before correcting and then drawn
+                // opaque, so the dimmed result still meets the target.
+                const acc_on = self.acc_enabled and !noMinContrast(cell.codepoint()) and !rex_acc.isGraph(cell.codepoint());
+                const cell_bg = bg orelse state.colors.background;
+                const glyph_fg = if (acc_on) self.accText(fg, cell_bg, style.flags.faint) else fg;
+
                 // Foreground alpha for this cell.
-                const alpha: u8 = if (style.flags.faint) self.config.faint_opacity else 255;
+                const alpha: u8 = if (style.flags.faint and !acc_on) self.config.faint_opacity else 255;
 
                 // Set the cell's background color.
                 {
@@ -3233,7 +3281,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     @intCast(x),
                     @intCast(y),
                     underline,
-                    style.underlineColor(&state.colors.palette) orelse fg,
+                    if (style.underlineColor(&state.colors.palette)) |c|
+                        (if (acc_on) self.accText(c, cell_bg, style.flags.faint) else c)
+                    else
+                        glyph_fg,
                     alpha,
                 ) catch |err| {
                     log.warn(
@@ -3242,7 +3293,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     );
                 };
 
-                if (style.flags.overline) self.addOverline(@intCast(x), @intCast(y), fg, alpha) catch |err| {
+                if (style.flags.overline) self.addOverline(@intCast(x), @intCast(y), glyph_fg, alpha) catch |err| {
                     log.warn(
                         "error adding overline to cell, will be invalid x={} y={}, err={}",
                         .{ x, y, err },
@@ -3312,7 +3363,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                             cells_raw,
                             shaped_cells[shaper_cells_i],
                             shaper_run.?,
-                            fg,
+                            glyph_fg,
                             alpha,
                         ) catch |err| {
                             log.warn(
@@ -3327,7 +3378,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (style.flags.strikethrough) self.addStrikethrough(
                     @intCast(x),
                     @intCast(y),
-                    fg,
+                    glyph_fg,
                     alpha,
                 ) catch |err| {
                     log.warn(

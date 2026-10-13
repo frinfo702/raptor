@@ -434,6 +434,8 @@ fn drainMailbox(self: *Thread) !void {
                 self.flags.has_inspector = v;
             },
 
+            .toggle_contrast_correction => self.renderer.toggleContrastCorrection(),
+
             .macos_display_id => |v| {
                 if (@hasDecl(rendererpkg.Renderer, "setMacOSDisplayID")) {
                     try self.renderer.setMacOSDisplayID(v, &self.draw_now);

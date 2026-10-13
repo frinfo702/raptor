@@ -783,6 +783,23 @@ foreground: Color = .{ .r = 0xFF, .g = 0xFF, .b = 0xFF },
 /// This value does not apply to Emoji or images.
 @"minimum-contrast": f64 = 1,
 
+/// Raptor's Automatic Contrast Correction. Text whose WCAG contrast against
+/// its own cell background is below 4.5:1 is moved the smallest OKLab
+/// lightness step that makes it legible, keeping its hue and leaning towards
+/// the theme's colors instead of snapping to black or white.
+///
+/// Valid values:
+///
+///   * `auto` - On for light themes (where dark text is the legible choice
+///     on the background), off otherwise.
+///   * `on` - Always on.
+///   * `off` - Always off.
+///
+/// Box drawing, block elements, Powerline and Braille (graph) glyphs keep their
+/// colors. Faint text and underline, overline and strikethrough lines are
+/// corrected too. The `toggle_contrast_correction` action flips it at runtime.
+@"contrast-correction": ContrastCorrection = .auto,
+
 /// Color palette for the 256 color form that many terminal applications use.
 /// The syntax of this configuration is `N=COLOR` where `N` is 0 to 255 (for
 /// the 256 colors in the terminal color table) and `COLOR` is a typical RGB
@@ -5527,6 +5544,13 @@ pub const Fullscreen = enum(c_int) {
     @"non-native",
     @"non-native-visible-menu",
     @"non-native-padded-notch",
+};
+
+/// See contrast-correction
+pub const ContrastCorrection = enum {
+    auto,
+    on,
+    off,
 };
 
 pub const WindowPaddingColor = enum {

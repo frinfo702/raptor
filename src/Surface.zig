@@ -5581,6 +5581,11 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             log.debug("mouse reporting toggled: {}", .{self.config.mouse_reporting});
         },
 
+        .toggle_contrast_correction => {
+            _ = self.renderer_thread.mailbox.push(global.io(), .toggle_contrast_correction, .forever);
+            try self.renderer_thread.wakeup.notify();
+        },
+
         .toggle_command_palette => return try self.rt_app.performAction(
             .{ .surface = self },
             .toggle_command_palette,

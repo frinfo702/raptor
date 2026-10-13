@@ -673,6 +673,12 @@ fn actionCommands(action: Action.Key) []const Command {
             .description = i18n.N_("Toggle whether mouse events are reported to terminal applications."),
         }},
 
+        .toggle_contrast_correction => comptime &.{.{
+            .action = .toggle_contrast_correction,
+            .title = i18n.N_("Toggle Contrast Correction"),
+            .description = i18n.N_("Toggle automatic correction of low-contrast text."),
+        }},
+
         .toggle_background_opacity => comptime &.{.{
             .action = .toggle_background_opacity,
             .title = i18n.N_("Toggle Background Opacity"),

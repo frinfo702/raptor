@@ -802,6 +802,12 @@ pub const Action = union(enum) {
     /// option.
     toggle_mouse_reporting,
 
+    /// Toggle Raptor's Automatic Contrast Correction for the current surface.
+    ///
+    /// The initial state comes from the `contrast-correction` configuration
+    /// option.
+    toggle_contrast_correction,
+
     /// Toggle the command palette.
     ///
     /// The command palette is a popup that lets you see what actions
@@ -1427,6 +1433,7 @@ pub const Action = union(enum) {
             .toggle_window_float_on_top,
             .toggle_secure_input,
             .toggle_mouse_reporting,
+            .toggle_contrast_correction,
             .toggle_command_palette,
             .toggle_background_opacity,
             .show_on_screen_keyboard,
