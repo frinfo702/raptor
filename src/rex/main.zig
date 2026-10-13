@@ -12,6 +12,7 @@ pub const listdir = @import("listdir.zig");
 pub const proc = @import("proc.zig");
 pub const protocol = @import("protocol.zig");
 pub const restore = @import("restore.zig");
+pub const shell = @import("shell.zig");
 
 test {
     _ = Block;
@@ -29,4 +30,5 @@ test {
     _ = proc;
     _ = protocol;
     _ = restore;
+    _ = shell;
 }

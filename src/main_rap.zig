@@ -107,6 +107,7 @@ fn serverRun(init: std.process.Init, args: cli.Args, stderr: *std.Io.Writer) !Ex
         .socket_path = path,
         .env = init.environ_map,
         .idle_timeout_ms = idle_ms,
+        .shell_integration = .load(alloc),
     }) catch |err| {
         switch (err) {
             error.AlreadyRunning => try stderr.print("rap: server already running on {s}\n", .{path}),

@@ -34,6 +34,7 @@ const layout = @import("layout.zig");
 const listdir = @import("listdir.zig");
 const proc = @import("proc.zig");
 const protocol = @import("protocol.zig");
+const shell = @import("shell.zig");
 const program_status = @import("../terminal/osc/parsers/program_status.zig");
 
 const log = std.log.scoped(.rex_server);
@@ -59,6 +60,9 @@ pub const Options = struct {
 
     /// Exit once there have been no sessions and no clients for this long.
     idle_timeout_ms: u64 = 30_000,
+
+    /// Ghostty's shell integration for the blocks' shells.
+    shell_integration: shell.Integration = .{},
 };
 
 const Tree = layout.Tree(*Pane);
@@ -214,6 +218,7 @@ compress_armed: bool = false,
 /// Quiet blocks that may have scrollback left to compress.
 compress_queue: std.ArrayList(*Pane) = .empty,
 env: EnvMap,
+shell_integration: shell.Integration,
 idle_timeout_ms: u64,
 idle_since: ?i64 = null,
 started_ms: i64,
@@ -301,6 +306,7 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
         .timer = try .init(),
         .compress_timer = try .init(),
         .env = env,
+        .shell_integration = opts.shell_integration,
         .idle_timeout_ms = opts.idle_timeout_ms,
         .started_ms = undefined,
     };
@@ -1324,9 +1330,13 @@ fn spawnPane(self: *Server, s: *Session, req: *Request) Error!*Pane {
     try env.put("TERM", "xterm-256color");
     try env.put("COLORTERM", "truecolor");
 
-    const args = try req.command() orelse args: {
-        const shell = try req.arena.dupeSentinel(u8, self.env.get("SHELL") orelse "/bin/sh", 0);
-        break :args try req.arena.dupe([:0]const u8, &.{shell});
+    const command = try req.command() orelse args: {
+        const sh = try req.arena.dupeSentinel(u8, self.env.get("SHELL") orelse "/bin/sh", 0);
+        break :args try req.arena.dupe([:0]const u8, &.{sh});
+    };
+    const args = self.shell_integration.apply(req.arena, command, &env) catch |err| args: {
+        log.warn("shell integration failed: {t}", .{err});
+        break :args command;
     };
     const cwd = if (req.str("cwd")) |p| try req.arena.dupeSentinel(u8, p, 0) else s.cwd orelse
         if (self.env.get("HOME")) |h| try req.arena.dupeSentinel(u8, h, 0) else null;

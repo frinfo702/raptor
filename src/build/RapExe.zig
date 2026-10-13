@@ -54,6 +54,13 @@ pub fn init(
     _ = try deps.add(test_exe);
 
     const install_step = b.addInstallArtifact(exe, .{});
+    // The server injects Ghostty's shell integration into its shells.
+    install_step.step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = b.path("src/shell-integration"),
+        .install_dir = .{ .custom = "share" },
+        .install_subdir = b.pathJoin(&.{ "ghostty", "shell-integration" }),
+        .exclude_extensions = &.{".md"},
+    }).step);
     cfg.addPatchElf(exe, &install_step.step);
 
     const test_run = b.addRunArtifact(test_exe);
