@@ -125,7 +125,7 @@ if [ -f "$img" ]; then
     near "chrome" "$(px "$img" 2000 8)" 131313
     # The hairline under the title bar, at the right edge clear of tabs.
     for y in $(seq 60 100); do
-        [ "$(px "$img" 2100 $y)" != "$(px "$img" 2100 8)" ] && break
+        [ "$(px "$img" 2100 "$y")" != "$(px "$img" 2100 8)" ] && break
     done
     within "title bar height (px at 2x)" "$y" 2 80
     # The active pill: the run of its colour, the second most common after the
@@ -146,7 +146,7 @@ EOF
     # The vertical divider between the left and right panes.
     d=none
     for x in $(seq 1070 1090); do
-        c=$(px "$img" $x 1300)
+        c=$(px "$img" "$x" 1300)
         [ "$c" = "$(px "$img" 1060 1300)" ] || {
             d=$c
             break
