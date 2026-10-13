@@ -200,6 +200,10 @@ final class RaptorClient {
         // Tests drive the client themselves.
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
               let shared else { return false }
+        if !shared.controllers.isEmpty {
+            shared.controllers.forEach { $0.showWindow(nil) }
+            return true
+        }
         guard let list: SessionList = shared.call("session.list") else { return false }
         let existing = list.sessions.map(\.id)
         var ids = attached.filter(existing.contains)

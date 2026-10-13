@@ -227,6 +227,14 @@ class RaptorController: BaseTerminalController {
         if let w = view.windows.first(where: { $0.id == view.active_window }),
            switched || reshaped || w.focused_block != focusedBefore || focusedSurface.map({ !tree.contains($0) }) ?? true,
            let target = surfaces[w.focused_block] {
+            if window?.isKeyWindow != true,
+               client.controllers.contains(where: { $0 !== self && $0.session == session }) {
+                if (window?.firstResponder as? Ghostty.SurfaceView).map({ !tree.contains($0) }) ?? true {
+                    focusedPane = target
+                    window?.initialFirstResponder = target
+                }
+                return
+            }
             // The header shows it even while the window isn't key.
             focusedPane = target
             // A window made key with nothing focused focuses its first key view, the
@@ -663,6 +671,9 @@ class RaptorController: BaseTerminalController {
     override func windowDidBecomeKey(_ notification: Notification) {
         super.windowDidBecomeKey(notification)
         if let s = focusedSurface?.surface { rap_client_claim(stream, s) }
+        if let window, window.firstResponder === window, let pane = focusedPane {
+            Ghostty.moveFocus(to: pane)
+        }
     }
 
     /// The window closed: detach, leaving the session and its processes running.
