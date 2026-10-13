@@ -104,7 +104,12 @@ class RaptorController: BaseTerminalController {
         window.appearance = NSAppearance(named: tokens.isLight ? .aqua : .darkAqua)
         window.isOpaque = solid
         window.backgroundColor = solid ? tokens.chrome : .clear
-        terminalViewContainer?.ghosttyConfigDidChange(ghostty.config, preferredBackgroundColor: tokens.chrome)
+        // Glass is tinted like Blended's blur, whatever background-opacity the user's
+        // config sets for the panes.
+        terminalViewContainer?.ghosttyConfigDidChange(
+            ghostty.config,
+            preferredBackgroundColor: tokens.chrome,
+            glassTint: RaptorWindowBackground.tint)
     }
 
     required init?(coder: NSCoder) {
@@ -157,6 +162,7 @@ class RaptorController: BaseTerminalController {
     /// Fetch the session's view and bring the tabs and splits in line with it.
     func refresh() {
         guard let view: SessionView = client.call("session.view", ["session": session]) else { return }
+        let focusedBefore = self.view?.windows.first { $0.id == view.active_window }?.focused_block
         self.view = view
         label = view.label
         titleOverride = view.label
@@ -187,11 +193,14 @@ class RaptorController: BaseTerminalController {
         let switched = activeTab != view.active_window
         activeTab = view.active_window
         let tree = trees[view.active_window] ?? .init()
-        if tree.root != surfaceTree.root || tree.zoomed != surfaceTree.zoomed { surfaceTree = tree }
+        let reshaped = tree.root != surfaceTree.root || tree.zoomed != surfaceTree.zoomed
+        if reshaped { surfaceTree = tree }
 
-        // Focus the server's focused block when the tab changes or focus was lost.
-        if switched || focusedSurface.map({ !tree.contains($0) }) ?? true,
-           let w = view.windows.first(where: { $0.id == view.active_window }),
+        // Focus the server's focused block when the tab changes, the server moves focus
+        // (a new split, from here or elsewhere), or focus was lost. A reshaped tree
+        // counts too: removing a pane leaves the window itself as first responder.
+        if let w = view.windows.first(where: { $0.id == view.active_window }),
+           switched || reshaped || w.focused_block != focusedBefore || focusedSurface.map({ !tree.contains($0) }) ?? true,
            let target = surfaces[w.focused_block] {
             // The header shows it even while the window isn't key.
             focusedPane = target
@@ -291,6 +300,13 @@ class RaptorController: BaseTerminalController {
     override func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
         super.focusedSurfaceDidChange(to: to)
         if let to, to !== focusedPane { focusedPane = to }
+        // Keep the server's focused block on the pane the user picked, so its own focus
+        // moves (closing a pane, zooming) start from there.
+        if let to, let block = block(of: to),
+           let w = view?.windows.first(where: { $0.id == view?.active_window }),
+           w.focused_block != block {
+            client.call("session.focus", ["session": session, "block": block])
+        }
     }
 
     /// The session ended, so there is nothing left to show.

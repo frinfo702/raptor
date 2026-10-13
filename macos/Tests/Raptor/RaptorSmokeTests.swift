@@ -1,6 +1,7 @@
 import AppKit
 import XCTest
 @testable import Ghostty
+import GhosttyKit
 
 /// Launch-and-attach: the app starts a private rap server from its bundled helper,
 /// opens a session window whose pane shows the block's output, and closing the window
@@ -100,6 +101,86 @@ final class RaptorSmokeTests: XCTestCase {
         controller.window?.close()
     }
 
+    /// ⌘D, a pane header's split button, `rap split` from outside the app and ⌘T each
+    /// hand the keyboard to the pane or tab they make, once the server shows it.
+    @MainActor
+    func testNewPanesTakeFocus() throws {
+        let socket = "/tmp/raptor-xctest-focus-\(getpid()).sock"
+        let client = try XCTUnwrap(RaptorClient(socket: socket), "no server started from the bundled rap")
+        defer {
+            client.call("server.stop")
+            unlink(socket + ".lock")
+        }
+        let ghostty = try XCTUnwrap((NSApp.delegate as? AppDelegate)?.ghostty)
+        let created: Created = try XCTUnwrap(client.call("session.create", [
+            "command": ["/bin/sh", "-c", "exec sleep 60"],
+        ]))
+        defer { client.call("session.kill", ["session": created.session]) }
+        let controller = client.open(ghostty, session: created.session)
+        defer { controller.window?.close() }
+
+        /// Wait for a pane that wasn't there before to hold the keyboard.
+        var old: [Ghostty.SurfaceView] = []
+        func waitForNewFocus(_ what: String) {
+            let deadline = Date().addingTimeInterval(10)
+            var responder: Ghostty.SurfaceView?
+            repeat {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                responder = controller.window?.firstResponder as? Ghostty.SurfaceView
+            } while (responder.map { old.contains($0) } ?? true) && Date() < deadline
+            defer { old = Array(controller.surfaceTree) }
+            guard let responder else { return XCTFail("\(what): no pane has the keyboard") }
+            XCTAssertFalse(old.contains(responder), "\(what): focus stayed on an old pane")
+            XCTAssertTrue(controller.surfaceTree.contains(responder), "\(what): focus is off the tab")
+        }
+        waitForNewFocus("open")
+
+        // ⌘D: libghostty's new_split action on the focused pane.
+        var focused = try XCTUnwrap(controller.window?.firstResponder as? Ghostty.SurfaceView)
+        ghostty.split(surface: try XCTUnwrap(focused.surface), direction: GHOSTTY_SPLIT_DIRECTION_RIGHT)
+        waitForNewFocus("new_split keybinding")
+
+        // The header's Split Down button.
+        focused = try XCTUnwrap(controller.window?.firstResponder as? Ghostty.SurfaceView)
+        controller.split(focused, .down)
+        waitForNewFocus("header split button")
+
+        // The bundled CLI, which splits on the server without the app asking.
+        let rap = Process()
+        rap.executableURL = try XCTUnwrap(Bundle.main.url(forAuxiliaryExecutable: "rap"))
+        rap.arguments = ["-S", socket, "split", "-s", created.session]
+        try rap.run()
+        rap.waitUntilExit()
+        XCTAssertEqual(rap.terminationStatus, 0)
+        waitForNewFocus("rap split")
+
+        // A pane picked here keeps the keyboard when the server closes another one.
+        let newest = try XCTUnwrap(controller.window?.firstResponder as? Ghostty.SurfaceView)
+        let panes = Array(controller.surfaceTree)
+        let picked = try XCTUnwrap(panes.dropFirst().first { $0 !== newest })
+        Ghostty.moveFocus(to: picked)
+        var deadline = Date().addingTimeInterval(10)
+        while controller.window?.firstResponder !== picked && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        client.call("block.close", ["block": try XCTUnwrap(controller.block(of: newest))])
+        deadline = Date().addingTimeInterval(10)
+        while controller.surfaceTree.contains(newest) && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        XCTAssertFalse(controller.surfaceTree.contains(newest), "block.close: the pane stayed")
+        XCTAssertTrue(controller.window?.firstResponder === picked, "block.close: focus left the picked pane")
+        old = Array(controller.surfaceTree)
+
+        // ⌘T: libghostty's new_tab action.
+        focused = try XCTUnwrap(controller.window?.firstResponder as? Ghostty.SurfaceView)
+        ghostty.newTab(surface: try XCTUnwrap(focused.surface))
+        waitForNewFocus("new_tab keybinding")
+        XCTAssertEqual(controller.tabs.count, 2)
+    }
+
     /// Settings → Appearance applies to an open window at once, keeping its panes:
     /// the same surfaces stay bound to the same blocks.
     @MainActor
@@ -138,9 +219,16 @@ final class RaptorSmokeTests: XCTestCase {
             for d in RaptorAppearance.Density.allCases {
                 for h in [true, false] {
                     (appearance.style, appearance.density, appearance.paneHeaders) = (s, d, h)
-                    settle { controller.window?.isOpaque == (appearance.effectiveStyle == .solid) }
+                    let glass = appearance.effectiveStyle == .glass
+                    /// Glass is tinted like Blended, not at the panes' background-opacity.
+                    var glassTint: Double? { controller.terminalViewContainer?.derivedConfig?.backgroundOpacity }
+                    settle {
+                        controller.window?.isOpaque == (appearance.effectiveStyle == .solid) &&
+                            (glassTint == (glass ? RaptorWindowBackground.tint : nil))
+                    }
                     let what = "\(s) \(d) headers \(h)"
                     XCTAssertEqual(controller.window?.isOpaque, appearance.effectiveStyle == .solid, what)
+                    XCTAssertEqual(glassTint, glass ? RaptorWindowBackground.tint : nil, what)
                     XCTAssertEqual(Array(controller.surfaceTree), panes, "\(what) replaced a pane")
                     XCTAssertTrue(panes.allSatisfy { $0.window === controller.window }, "\(what) took a pane off screen")
                     XCTAssertTrue(panes.allSatisfy { controller.block(of: $0) != nil }, "\(what) unbound a pane")
