@@ -170,6 +170,8 @@ test "rex client: requests, events, and a bound block across a reconnect" {
     };
     defer alloc.free(block);
     try events.wait("\"session_created\"", 1);
+    // The server reports the block's foreground program within a tick.
+    try events.wait("\"event\":\"process_changed\"", 1);
 
     var ts: TestSink = .{ .mirror = .init(alloc, testing.io) };
     defer ts.mirror.deinit();

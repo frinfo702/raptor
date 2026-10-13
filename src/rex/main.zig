@@ -8,6 +8,8 @@ pub const Server = @import("Server.zig");
 pub const dataplane = @import("dataplane.zig");
 pub const ids = @import("ids.zig");
 pub const layout = @import("layout.zig");
+pub const listdir = @import("listdir.zig");
+pub const proc = @import("proc.zig");
 pub const protocol = @import("protocol.zig");
 pub const restore = @import("restore.zig");
 
@@ -23,6 +25,8 @@ test {
     _ = Server;
     _ = ids;
     _ = layout;
+    _ = listdir;
+    _ = proc;
     _ = protocol;
     _ = restore;
 }
