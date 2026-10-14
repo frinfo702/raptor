@@ -93,25 +93,9 @@ pub fn init(
         break :build step;
     };
 
-    // Sign so macOS privacy grants (Accessibility, needed by global
-    // keybinds) survive rebuilds: with the local Raptor certificate when
-    // the keychain has it, else ad-hoc pinned to the bundle id.
-    const pin_requirement = pin: {
-        const bundle_id = switch (config.optimize) {
-            .debug => "com.frinfo702.raptor.debug",
-            .safe, .small, .fast => "com.frinfo702.raptor",
-        };
-        const step = RunStep.create(b, "sign Raptor.app");
-        step.stdio = .inherit;
-        step.cwd = b.path("");
-        step.addArgs(&.{
-            "dist/macos/raptor-sign.sh",
-            app_path,
-            bundle_id,
-            "5D5AD364BDE44F4931192D3879AC4025F096AE1F",
-        });
-        step.step.dependOn(&build.step);
-        break :pin step;
+    const bundle_id = switch (config.optimize) {
+        .debug => "com.frinfo702.raptor.debug",
+        .safe, .small, .fast => "com.frinfo702.raptor",
     };
 
     const xctest = xctest: {
@@ -162,7 +146,9 @@ pub fn init(
             b.fmt("{s}/Contents/Info.plist", .{app_path}),
         });
         disable_save_state.expectExitCode(0);
-        disable_save_state.step.dependOn(&pin_requirement.step);
+        disable_save_state.step.dependOn(&build.step);
+        const sign = signStep(b, app_path, bundle_id);
+        sign.step.dependOn(&disable_save_state.step);
 
         const open = RunStep.create(b, "run Ghostty app");
         open.has_side_effects = true;
@@ -173,8 +159,7 @@ pub fn init(
         )});
 
         // Open depends on the app
-        open.step.dependOn(&build.step);
-        open.step.dependOn(&disable_save_state.step);
+        open.step.dependOn(&sign.step);
 
         // This overrides our default behavior and forces logs to show
         // up on stderr (in addition to the centralized macOS log).
@@ -195,7 +180,9 @@ pub fn init(
         step.addArgs(&.{ "cp", "-R" });
         step.addFileArg(b.path(app_path));
         step.addDirectoryArg2(b.graph.path(.install_prefix, ""), .{});
-        step.step.dependOn(&pin_requirement.step);
+        const sign = signStep(b, app_path, bundle_id);
+        sign.step.dependOn(&build.step);
+        step.step.dependOn(&sign.step);
         break :copy step;
     };
 
@@ -205,6 +192,24 @@ pub fn init(
         .copy = copy,
         .xctest = xctest,
     };
+}
+
+/// Sign so macOS privacy grants (Accessibility, needed by global
+/// keybinds) survive rebuilds: with the local Raptor certificate when
+/// the keychain has it, else ad-hoc pinned to the bundle id. Signing
+/// must come after every edit to the bundle.
+fn signStep(b: *std.Build, app_path: []const u8, bundle_id: []const u8) *RunStep {
+    const step = RunStep.create(b, "sign Raptor.app");
+    step.has_side_effects = true;
+    step.stdio = .inherit;
+    step.cwd = b.path("");
+    step.addArgs(&.{
+        "dist/macos/raptor-sign.sh",
+        app_path,
+        bundle_id,
+        "5D5AD364BDE44F4931192D3879AC4025F096AE1F",
+    });
+    return step;
 }
 
 pub fn install(self: *const Ghostty) void {
