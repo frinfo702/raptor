@@ -9,8 +9,9 @@ memory (`terminal.Page`).
 When making tradeoffs, in order:
 
 1. **Compression ratio on page-shaped data.** Encoded bytes are retained
-   scrollback memory, and raw `terminal.Page` backing memory is the only
-   thing we actually compress. Ratio on text files or synthetic data is a
+   scrollback memory, and `terminal.Page` backing memory (row-packed by
+   `rowpack.zig` when possible, raw otherwise) is the only thing we
+   actually compress. Ratio on text files or synthetic data is a
    secondary signal.
 2. **Decompression throughput.** Pages are compressed once when they go
    cold but restored on demand (scrollback access, search, inspection), so
