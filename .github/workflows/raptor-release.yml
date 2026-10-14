@@ -1,4 +1,5 @@
-# Fork-only: attach an ad-hoc-signed Raptor DMG to each GitHub release.
+# Fork-only: attach a self-signed (or, without the signing secrets,
+# ad-hoc-signed) Raptor DMG to each GitHub release.
 # Free (no Apple Developer Program), so the app is not notarized and the
 # release notes tell users how to open it.
 name: Raptor Release DMG
@@ -57,11 +58,45 @@ jobs:
       - name: Xcode Version
         run: xcodebuild -version
 
+      # raptor-dmg.sh signs with the Raptor certificate when a keychain
+      # has it, so macOS privacy grants survive updates.
+      - name: Import signing certificate
+        env:
+          RAPTOR_SIGNING_P12: ${{ secrets.RAPTOR_SIGNING_P12 }}
+          RAPTOR_SIGNING_P12_PASSWORD: ${{ secrets.RAPTOR_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$RAPTOR_SIGNING_P12" ] || [ -z "$RAPTOR_SIGNING_P12_PASSWORD" ]; then
+            echo "::warning::RAPTOR_SIGNING_P12 or RAPTOR_SIGNING_P12_PASSWORD is not set; the DMG will be ad-hoc signed, so users must re-grant Accessibility after updating"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/raptor-signing.keychain-db"
+          p12="$RUNNER_TEMP/raptor-signing.p12"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          printf '%s' "$RAPTOR_SIGNING_P12" | base64 --decode > "$p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -f pkcs12 \
+            -P "$RAPTOR_SIGNING_P12_PASSWORD" -T /usr/bin/codesign >/dev/null
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" \
+            $(security list-keychains -d user | tr -d '"')
+          rm -f "$p12"
+
       - name: Build DMG
         run: |
           set -euo pipefail
           RAPTOR_SRC="$PWD" .release-tools/dist/macos/raptor-dmg.sh "$TAG"
           echo "DMG=Raptor-${TAG#raptor-v}.dmg" >> "$GITHUB_ENV"
+
+      - name: Delete signing keychain
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/raptor-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/raptor-signing.p12"
 
       - name: Upload DMG
         run: gh release upload "$TAG" "$DMG" --clobber --repo "$GITHUB_REPOSITORY"
@@ -110,7 +145,7 @@ jobs:
           ## Installing $DMG
 
           Requires an Apple silicon Mac. Open the DMG and drag Raptor to
-          Applications. The app is ad-hoc signed, not notarized, so macOS
+          Applications. The app is not notarized, so macOS
           blocks the first launch. Either:
 
           - Open Raptor once, then go to System Settings → Privacy & Security
@@ -120,9 +155,9 @@ jobs:
           Later versions install through Raptor → Check for Updates.
 
           Global keybinds (\`keybind = global:...\`) need Accessibility access.
-          If Raptor keeps asking for it although it is enabled, the grant was
-          made for an older build: remove Raptor under System Settings →
-          Privacy & Security → Accessibility, launch Raptor and allow it once.
-          Later updates and local builds then share that grant.
+          Coming from an ad-hoc signed Raptor, re-grant it once: in System
+          Settings → Privacy & Security → Accessibility, remove Raptor with
+          "-", launch the new Raptor and allow it. Afterwards release updates
+          and local builds signed with the same certificate share the grant.
           EOF
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md

@@ -93,31 +93,23 @@ pub fn init(
         break :build step;
     };
 
-    // An ad-hoc signature's default designated requirement is its cdhash,
-    // so macOS privacy grants (Accessibility, needed by global keybinds)
-    // stop matching after every rebuild. Pin it to the bundle id instead.
-    // Only the outer bundle: nested code must keep its own requirement.
+    // Sign so macOS privacy grants (Accessibility, needed by global
+    // keybinds) survive rebuilds: with the local Raptor certificate when
+    // the keychain has it, else ad-hoc pinned to the bundle id.
     const pin_requirement = pin: {
         const bundle_id = switch (config.optimize) {
             .debug => "com.frinfo702.raptor.debug",
             .safe, .small, .fast => "com.frinfo702.raptor",
         };
-        const step = RunStep.create(b, "pin designated requirement");
-        step.has_side_effects = true;
+        const step = RunStep.create(b, "sign Raptor.app");
+        step.stdio = .inherit;
         step.cwd = b.path("");
         step.addArgs(&.{
-            "codesign",
-            "--force",
-            "--sign",
-            "-",
-            "--preserve-metadata=entitlements,flags",
-            "--requirements",
-            b.fmt("=designated => identifier \"{s}\"", .{bundle_id}),
+            "dist/macos/raptor-sign.sh",
             app_path,
+            bundle_id,
+            "5D5AD364BDE44F4931192D3879AC4025F096AE1F",
         });
-        step.expectExitCode(0);
-        // Swallow codesign's "replacing existing signature" notice.
-        _ = step.captureStdErr(.{});
         step.step.dependOn(&build.step);
         break :pin step;
     };

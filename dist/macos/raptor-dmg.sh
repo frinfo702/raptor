@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Raptor.app, ad-hoc sign it, and package it as a DMG.
+# Build Raptor.app, sign it, and package it as a DMG.
 #
 #   dist/macos/raptor-dmg.sh <raptor-vX.Y.Z tag> [zig command...]
 #
@@ -7,7 +7,11 @@
 # so CI can build an old tag with current tooling. Writes Raptor-X.Y.Z.dmg
 # to that tree's root and prints its path.
 # The zig command defaults to `zig`; locally use `direnv exec . zig`.
+# Signs with the Raptor certificate when the keychain has it, else ad-hoc
+# (see raptor-sign.sh).
 set -euo pipefail
+
+tools="$(cd "$(dirname "$0")" && pwd)"
 
 tag="${1:?usage: raptor-dmg.sh <raptor-vX.Y.Z tag> [zig command...]}"
 shift
@@ -17,7 +21,7 @@ version="${BASH_REMATCH[1]}"
 zig=("$@")
 [ ${#zig[@]} -gt 0 ] || zig=(zig)
 
-cd "${RAPTOR_SRC:-$(dirname "$0")/../..}"
+cd "${RAPTOR_SRC:-$tools/../..}"
 # Native (arm64 on Apple silicon) because the bundled rap is built for
 # the host only; a universal app would ship an arm64-only rap.
 # An explicit version skips git tag detection, which rejects raptor-v* tags.
@@ -36,14 +40,10 @@ app=zig-out/Raptor.app
   -c "Delete :SUEnableAutomaticChecks" \
   "$app/Contents/Info.plist"
 
-# Ad-hoc signature: no Apple Developer account needed, but Gatekeeper
-# will still ask the user to approve the app on first launch.
-codesign --force --deep --sign - "$app"
-# An ad-hoc signature's default designated requirement is its cdhash, so
-# macOS privacy grants (Accessibility for global keybinds) would not
-# survive an update. Pin it to the bundle id instead, as Xcode does.
-codesign --force --sign - \
-  --requirements '=designated => identifier "com.frinfo702.raptor"' "$app"
+# Self-signed or ad-hoc, not Developer ID: no Apple Developer account
+# needed, but Gatekeeper will still ask the user to approve the app on
+# first launch.
+"$tools/raptor-sign.sh" "$app" com.frinfo702.raptor 5D5AD364BDE44F4931192D3879AC4025F096AE1F
 codesign --verify --deep --strict "$app"
 
 staging="$(mktemp -d)"
