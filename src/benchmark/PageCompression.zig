@@ -16,8 +16,11 @@
 //!
 //! A raw dump of actual page backing memory is the most representative input:
 //! it includes cells, rows, styles, graphemes, hyperlinks, allocator metadata,
-//! and unused capacity exactly as the codec would see them. Keep such corpora
-//! outside the repository and reuse the same file when comparing branches.
+//! and unused capacity exactly as the codec would see them for pages that
+//! `compress.Page.init` cannot row-pack (packable pages reach LZ4 as a much
+//! smaller row-packed image; see `terminal/compress/rowpack.zig`). Keep such
+//! corpora outside the repository and reuse the same file when comparing
+//! branches.
 //! Arbitrary files are accepted too, but their compression ratios should not be
 //! interpreted as terminal scrollback ratios.
 //!

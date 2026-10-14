@@ -38,6 +38,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const TerminalPage = @import("../page.zig").Page;
 const lz4 = @import("lz4.zig");
+const rowpack = @import("rowpack.zig");
 
 /// Complete page metadata together with the retained resident mapping.
 ///
@@ -46,8 +47,15 @@ const lz4 = @import("lz4.zig");
 /// successfully decoded the page.
 page: TerminalPage,
 
-/// Exact raw LZ4 block for `page.memory`.
+/// Exact raw LZ4 block. It decodes to the row-packed image of `page.memory`
+/// (see `rowpack.zig`) when `packed_len` is set, and to `page.memory` itself
+/// otherwise.
 encoded: []u8,
+
+/// The length of the row-packed image `encoded` decodes to, or null when it
+/// decodes to the raw page memory. Pages which cannot be row-packed fall back
+/// to the raw form.
+packed_len: ?usize,
 
 /// Allocator which owns `encoded`.
 ///
@@ -115,8 +123,19 @@ pub fn init(
     if (std.valgrind.runningOnValgrind() > 0)
         std.valgrind.memcheck.makeMemDefined(source.memory);
 
+    // Row packing shrinks typical pages several times over before LZ4 sees
+    // them. Its image needs its own buffer because the scratch receives the
+    // LZ4 output, and is exact-sized because it is usually small.
+    const packed_len = rowpack.packedLen(source);
+    const input: []const u8 = if (packed_len) |len| input: {
+        const buf = try alloc.alloc(u8, len);
+        rowpack.pack(source, buf);
+        break :input buf;
+    } else source.memory;
+    defer if (packed_len != null) alloc.free(input);
+
     const encoded_len = lz4.compress(
-        source.memory,
+        input,
         scratch[0..required],
         table,
     ) catch |err| switch (err) {
@@ -136,6 +155,7 @@ pub fn init(
     return .{
         .page = source.*,
         .encoded = try alloc.dupe(u8, scratch[0..encoded_len]),
+        .packed_len = packed_len,
         .alloc = alloc,
     };
 }
@@ -156,10 +176,28 @@ pub fn deinit(self: *Page) void {
 /// valid whether decoding succeeds or fails, allowing the caller to retry or
 /// discard it. On success the returned page aliases the same resident mapping;
 /// it does not own a new allocation.
-pub fn restore(self: *const Page) lz4.DecompressError!TerminalPage {
+pub fn restore(self: *const Page) RestoreError!TerminalPage {
     const result = self.page;
-    _ = try lz4.decompress(self.encoded, result.memory);
+    try self.decode(result.memory);
     return result;
+}
+
+/// Errors from decoding a compressed page. Either one means the encoded
+/// bytes or the retained metadata were corrupted.
+pub const RestoreError = lz4.DecompressError || rowpack.UnpackError;
+
+/// Decode the page memory into `memory`, which has the page's length.
+fn decode(self: *const Page, memory: []u8) RestoreError!void {
+    const len = self.packed_len orelse {
+        _ = try lz4.decompress(self.encoded, memory);
+        return;
+    };
+
+    // Unpacking expands in place from the end of the page memory, so the
+    // packed image needs no buffer of its own.
+    if (len > memory.len) return error.InvalidPacking;
+    _ = try lz4.decompress(self.encoded, memory[memory.len - len ..]);
+    try rowpack.unpack(self.page.capacity, memory, len);
 }
 
 /// Clone this page into caller-owned memory without restoring its mapping.
@@ -172,14 +210,14 @@ pub fn restore(self: *const Page) lz4.DecompressError!TerminalPage {
 pub fn cloneBuf(
     self: *const Page,
     memory: []align(std.heap.page_size_min) u8,
-) lz4.DecompressError!TerminalPage {
+) RestoreError!TerminalPage {
     assert(memory.len >= self.page.memory.len);
 
     // Page internals are offsets into the backing buffer, so all metadata can
     // be copied verbatim when paired with an equally laid-out mapping.
     var result = self.page;
     result.memory = memory[0..self.page.memory.len];
-    _ = try lz4.decompress(self.encoded, result.memory);
+    try self.decode(result.memory);
     return result;
 }
 
@@ -406,6 +444,84 @@ test "compressed Page can retry after malformed encoded data" {
 
     compressed.encoded = full_encoded;
     compressed.encoded[0] = first_byte;
+    @memset(resident.memory, 0);
+    const restored = try compressed.restore();
+    try testing.expectEqualSlices(u8, expected, restored.memory);
+}
+
+test "compressed Page row packs varied pages exactly" {
+    const testing = std.testing;
+
+    var resident = try rowpack.testPage();
+    defer resident.deinit();
+    const expected = try testing.allocator.dupe(u8, resident.memory);
+    defer testing.allocator.free(expected);
+
+    const scratch = try testing.allocator.alloc(
+        u8,
+        try requiredScratch(resident.memory.len),
+    );
+    defer testing.allocator.free(scratch);
+    var table: lz4.HashTable = undefined;
+    var compressed = (try Page.init(
+        testing.allocator,
+        &resident,
+        scratch,
+        &table,
+    )).?;
+    defer compressed.deinit();
+    try testing.expect(compressed.packed_len != null);
+
+    // Model a successful decommit, then decode both ways.
+    @memset(resident.memory, 0);
+    const clone_memory = try testing.allocator.alignedAlloc(
+        u8,
+        .fromByteUnits(std.heap.page_size_min),
+        resident.memory.len,
+    );
+    defer testing.allocator.free(clone_memory);
+    const cloned = try compressed.cloneBuf(clone_memory);
+    try testing.expectEqualSlices(u8, expected, cloned.memory);
+    try cloned.verifyIntegrity(testing.allocator);
+
+    const restored = try compressed.restore();
+    try testing.expectEqualSlices(u8, expected, restored.memory);
+    try restored.verifyIntegrity(testing.allocator);
+}
+
+test "compressed Page falls back to raw LZ4 when row packing declines" {
+    const testing = std.testing;
+
+    var resident = try TerminalPage.init(.{ .cols = 8, .rows = 8, .styles = 0 });
+    defer resident.deinit();
+
+    // Full-word rows with no zero tail cannot be unpacked in place, but
+    // they repeat, so raw LZ4 still saves memory.
+    const cells = resident.cells.ptr(resident.memory)[0 .. 8 * 8];
+    for (cells) |*cell| {
+        cell.* = .init('W');
+        cell.wide = .spacer_tail;
+    }
+    resident.memory[resident.memory.len - 1] = 1;
+    try testing.expectEqual(null, rowpack.packedLen(&resident));
+    const expected = try testing.allocator.dupe(u8, resident.memory);
+    defer testing.allocator.free(expected);
+
+    const scratch = try testing.allocator.alloc(
+        u8,
+        try requiredScratch(resident.memory.len),
+    );
+    defer testing.allocator.free(scratch);
+    var table: lz4.HashTable = undefined;
+    var compressed = (try Page.init(
+        testing.allocator,
+        &resident,
+        scratch,
+        &table,
+    )).?;
+    defer compressed.deinit();
+    try testing.expectEqual(null, compressed.packed_len);
+
     @memset(resident.memory, 0);
     const restored = try compressed.restore();
     try testing.expectEqualSlices(u8, expected, restored.memory);
