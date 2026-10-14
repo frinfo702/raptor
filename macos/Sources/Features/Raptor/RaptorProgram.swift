@@ -37,7 +37,6 @@ struct RaptorProgram: Equatable {
         "codex": "codex",
         "gh": "github",
         "git": "git",
-        "lazygit": "git",
         "opencode": "opencode",
     ]
 
