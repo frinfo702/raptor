@@ -94,11 +94,11 @@ pub fn packedLen(page: *const TerminalPage) ?usize {
     const meta_len = geo.metaLen(memory);
     const zeros = memory.len - geo.cells_end - meta_len;
 
-    // Before the first record the read cursor is `slack` bytes ahead of the
-    // write cursor, which is `slack - cells_len` with the image at the end
-    // of the memory. Each record changes that gap by its packed length minus
-    // its raw length, so the gap is narrowest, by `lead` bytes, after the
-    // prefix that expands the most.
+    // With the image at the end of the memory, the read cursor starts the
+    // first record `slack - cells_len` bytes ahead of the write cursor: the
+    // cell array plus the zero tail, minus the packed cell bytes. Each record
+    // changes that gap by its packed length minus its raw length, so the
+    // narrowest gap is `slack - cells_len - lead`, which must not be negative.
     const slack = (geo.cells_end - geo.cells_start) + zeros;
     if (slack < cells_len + lead) return null;
 
@@ -172,9 +172,10 @@ pub fn unpack(
     // Each value is read before its expanded word is written. `packedLen`
     // proved the packed bytes left to read never outnumber the raw bytes
     // left to write plus the zero tail, so for images it accepts the write
-    // cursor never passes the read cursor. Corrupt images may overwrite unread bytes but never escape
-    // `memory`: reads are checked against its end below, and each record
-    // writes exactly `cols` words, so `w` ends at `cells_end`.
+    // cursor never passes the read cursor. Corrupt images may overwrite
+    // unread bytes but never escape `memory`: reads are checked against its
+    // end below, and each record writes exactly `cols` words, so `w` ends at
+    // `cells_end`.
     var w = geo.cells_start;
     for (0..geo.rows) |_| {
         if (memory.len - r < record_header_len) return error.InvalidPacking;
