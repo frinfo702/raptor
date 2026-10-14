@@ -106,8 +106,11 @@
 	</array>
 	<key>SUEnableAutomaticChecks</key>
 	<false/>
+	<!-- The empty $() stops the Info.plist preprocessor from treating the URL slashes as a comment. -->
+	<key>SUFeedURL</key>
+	<string>https:/$()/github.com/frinfo702/rex/releases/latest/download/appcast.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>wsNcGf5hirwtdXMVnYoxRIX/SqZQLMOsYlD3q3imeok=</string>
+	<string>LO24VqBEhoyhSTIl8dq0qIz+hIVzIEmK/4qR+lFcPUI=</string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>

@@ -25,6 +25,15 @@ cd "$(dirname "$0")/../.."
 app=zig-out/Raptor.app
 [ -x "$app/Contents/MacOS/rap" ] || { echo "error: $app has no bundled rap" >&2; exit 1; }
 
+# Sparkle compares CFBundleVersion against the appcast's sparkle:version,
+# so both carry the tag's version. Dropping SUEnableAutomaticChecks lets
+# the auto-update config decide, as in Ghostty's release builds.
+/usr/libexec/PlistBuddy \
+  -c "Set :CFBundleVersion $version" \
+  -c "Set :CFBundleShortVersionString $version" \
+  -c "Delete :SUEnableAutomaticChecks" \
+  "$app/Contents/Info.plist"
+
 # Ad-hoc signature: no Apple Developer account needed, but Gatekeeper
 # will still ask the user to approve the app on first launch.
 codesign --force --deep --sign - "$app"
