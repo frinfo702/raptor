@@ -1330,14 +1330,18 @@ fn spawnPane(self: *Server, s: *Session, req: *Request) Error!*Pane {
     try env.put("TERM", "xterm-256color");
     try env.put("COLORTERM", "truecolor");
 
-    const command = try req.command() orelse args: {
+    const given = try req.command();
+    const command = given orelse args: {
         const sh = try req.arena.dupeSentinel(u8, self.env.get("SHELL") orelse "/bin/sh", 0);
         break :args try req.arena.dupe([:0]const u8, &.{sh});
     };
-    const args = self.shell_integration.apply(req.arena, command, &env) catch |err| args: {
+    const integrated = self.shell_integration.apply(req.arena, command, &env) catch |err| args: {
         log.warn("shell integration failed: {t}", .{err});
         break :args command;
     };
+    // The user's shell starts as a login shell, as in Ghostty; a given
+    // command runs as is.
+    const args = if (given == null) try shell.login(req.arena, integrated) else integrated;
     const cwd = if (req.str("cwd")) |p| try req.arena.dupeSentinel(u8, p, 0) else s.cwd orelse
         if (self.env.get("HOME")) |h| try req.arena.dupeSentinel(u8, h, 0) else null;
 

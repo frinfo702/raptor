@@ -249,6 +249,19 @@ done
 kill $events 2>/dev/null || true
 wait $events 2>/dev/null || true
 
+# On macOS the user's shell starts as a login shell through login(1), as
+# in Ghostty, so it reads the real home's startup files.
+if [ "$(uname)" = Darwin ]; then
+  "$RAP" new login-sh >/dev/null
+  i=0
+  until "$RAP" block call -s login-sh process | grep -q '"argv0":"-'; do
+    i=$((i + 1))
+    [ $i -lt 200 ] || fail "the default shell is not a login shell: $("$RAP" block call -s login-sh process)"
+    sleep 0.05
+  done
+  "$RAP" kill login-sh
+fi
+
 # shell-integration = none in the Ghostty config turns it off.
 "$RAP" server stop
 mkdir -p "$tmp/.config/ghostty"

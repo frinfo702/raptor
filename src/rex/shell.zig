@@ -2,9 +2,11 @@
 //! surface sets it up in termio's Exec; blocks are started by the server
 //! instead, so it does the same here from the user's Ghostty config.
 const std = @import("std");
+const builtin = @import("builtin");
 const EnvMap = std.process.Environ.Map;
 const configpkg = @import("../config.zig");
 const global = @import("../global.zig");
+const internal_os = @import("../os/main.zig");
 const shell_integration = @import("../termio/shell_integration.zig");
 
 const log = std.log.scoped(.rap_shell);
@@ -62,6 +64,31 @@ pub const Integration = struct {
         };
     }
 };
+
+/// Run the shell `args` as a login shell through login(1), as Ghostty's
+/// Exec does on macOS (see execCommand there for why): macOS users keep
+/// their PATH in /etc/zprofile and ~/.zprofile, which a server started by
+/// launchd never ran. `-p` keeps `env`, `-l` the cwd. Elsewhere, `args`.
+pub fn login(arena: std.mem.Allocator, args: []const [:0]const u8) ![]const [:0]const u8 {
+    if (comptime !builtin.target.os.tag.isDarwin()) return args;
+    const pw = internal_os.passwd.get(arena) catch |err| {
+        log.warn("failed to read passwd, not using a login shell err={}", .{err});
+        return args;
+    };
+    const name = pw.name orelse return args;
+    const hush = if (pw.home) |home| hush: {
+        var dir = std.Io.Dir.openDirAbsolute(global.io(), home, .{}) catch break :hush false;
+        defer dir.close(global.io());
+        break :hush if (dir.access(global.io(), ".hushlogin", .{})) true else |_| false;
+    } else false;
+    // bash's `exec -l` adds the dash; "$0" "$@" pass `args` unquoted.
+    const pre: []const [:0]const u8 = if (hush) &.{ "/usr/bin/login", "-q" } else &.{"/usr/bin/login"};
+    return std.mem.concat(arena, [:0]const u8, &.{
+        pre,
+        &.{ "-flp", name, "/bin/bash", "--noprofile", "--norc", "-c", "exec -l \"$0\" \"$@\"" },
+        args,
+    });
+}
 
 /// The arguments setupBash runs bash with: `--posix` added, and the
 /// startup file flags it hands to the integration script dropped.
@@ -157,4 +184,30 @@ test "rex shell: integration decision" {
         try testing.expectEqualStrings("cursor:blink,path,title", env.get("GHOSTTY_SHELL_FEATURES") orelse "");
         try testing.expectEqual(c.integ.resources_dir != null, env.get("GHOSTTY_RESOURCES_DIR") != null);
     }
+}
+
+test "rex shell: the user's shell is a login shell on macOS" {
+    if (comptime !builtin.target.os.tag.isDarwin()) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".zprofile", .data = "zprofile=ran\n" });
+
+    // A server started by launchd: its minimal PATH. login(1) resets HOME,
+    // so ZDOTDIR points zsh at the test's startup files.
+    var env: EnvMap = .init(alloc);
+    try env.put("PATH", "/usr/bin:/bin");
+    try env.put("ZDOTDIR", try tmp.dir.realPathFileAlloc(testing.io, ".", alloc));
+    const args = try login(alloc, &.{ "/bin/zsh", "-c", "print -r -- \"[login=$options[login] zprofile=$zprofile path=$PATH]\"" });
+    try testing.expectEqualStrings("/usr/bin/login", args[0]);
+    var argv: std.ArrayList([]const u8) = .empty;
+    for (args) |a| try argv.append(alloc, a);
+    const r = try std.process.run(alloc, testing.io, .{ .argv = argv.items, .environ_map = &env });
+    try testing.expect(r.term == .exited and r.term.exited == 0);
+    const out = r.stdout[std.mem.indexOf(u8, r.stdout, "[login=") orelse return error.NoOutput ..];
+    try testing.expect(std.mem.startsWith(u8, out, "[login=on zprofile=ran path="));
+    // /etc/zprofile's path_helper added /etc/paths to launchd's PATH.
+    try testing.expect(std.mem.indexOf(u8, out, "/usr/sbin") != null);
 }
