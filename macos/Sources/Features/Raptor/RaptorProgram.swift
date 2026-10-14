@@ -17,6 +17,8 @@ struct RaptorProgram: Equatable {
     let glyph: Color
     /// Agents title their panes with the task they're on.
     var isAgent = false
+    /// The tab card drawn instead of the tile, from `cards`.
+    var card: String?
 
     static let shells: Set<String> = [
         "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "xonsh",
@@ -26,7 +28,23 @@ struct RaptorProgram: Equatable {
         Color(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
     }
 
-    static let shell = RaptorProgram(name: "shell", icon: .text(">_"), tile: rgb(0x3B5C3E), glyph: rgb(0x8CD97F))
+    static let shell = RaptorProgram(name: "shell", icon: .text(">_"), tile: rgb(0x3B5C3E), glyph: rgb(0x8CD97F), card: "shell")
+
+    /// Tab cards by process name, shells aside: imagesets in RaptorCards.xcassets. A card
+    /// drawn for light and dark themes is two imagesets, "<card>-light" and "<card>-dark".
+    static let cards: [String: String] = [
+        "claude": "claudecode",
+        "codex": "codex",
+        "gh": "github",
+        "git": "git",
+        "lazygit": "git",
+        "opencode": "opencode",
+    ]
+
+    /// A card's image for a light or dark theme; a card with one image serves both.
+    static func cardImage(_ card: String, light: Bool) -> NSImage? {
+        NSImage(named: "\(card)-\(light ? "light" : "dark")") ?? NSImage(named: card)
+    }
 
     /// Programs by process name.
     private static let known: [String: RaptorProgram] = [
@@ -56,9 +74,11 @@ struct RaptorProgram: Equatable {
     static func identify(_ process: String?) -> RaptorProgram? {
         guard let process, !process.isEmpty else { return nil }
         if shells.contains(process) {
-            return .init(name: process, icon: shell.icon, tile: shell.tile, glyph: shell.glyph)
+            return .init(name: process, icon: shell.icon, tile: shell.tile, glyph: shell.glyph, card: shell.card)
         }
-        return known[process] ?? .init(name: process, icon: .symbol("terminal"), tile: rgb(0x3A3A3A), glyph: rgb(0xDDDDDD))
+        var program = known[process] ?? .init(name: process, icon: .symbol("terminal"), tile: rgb(0x3A3A3A), glyph: rgb(0xDDDDDD))
+        program.card = cards[process]
+        return program
     }
 
     /// A pane's title: an agent's own title, else "Name ~/path", else the terminal title.
@@ -88,19 +108,30 @@ struct RaptorProgramIcon: View {
     }
 }
 
-/// A tab's icon: the focused pane's program on its tile, with a coloured sliver behind
-/// it for each other pane, up to two.
+/// A tab's icon: the focused pane's program on its card or tile, with a coloured sliver
+/// behind it for each other pane, up to two.
 struct RaptorTileCluster: View {
     let program: RaptorProgram
     let others: [RaptorProgram]
+    /// Picks a card's light-theme art.
+    let light: Bool
 
     var body: some View {
         HStack(spacing: 0) {
-            RaptorProgramIcon(icon: program.icon, size: 12)
-                .foregroundStyle(program.glyph)
-                .frame(width: 18, height: 18)
-                .background(RoundedRectangle(cornerRadius: 5).fill(program.tile))
-                .zIndex(1)
+            Group {
+                if let card = program.card, let image = RaptorProgram.cardImage(card, light: light) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 18)
+                } else {
+                    RaptorProgramIcon(icon: program.icon, size: 12)
+                        .foregroundStyle(program.glyph)
+                        .frame(width: 18, height: 18)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(program.tile))
+                }
+            }
+            .zIndex(1)
             ForEach(Array(others.prefix(2).enumerated()), id: \.offset) { i, other in
                 RoundedRectangle(cornerRadius: 3)
                     .fill(other.glyph)

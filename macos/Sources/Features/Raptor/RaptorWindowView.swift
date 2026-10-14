@@ -218,7 +218,7 @@ struct RaptorTabView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            RaptorTileCluster(program: tab.program, others: tab.others)
+            RaptorTileCluster(program: tab.program, others: tab.others, light: tokens.isLight)
             // Long titles fade out instead of ending in an ellipsis.
             Text(tab.title)
                 .font(.system(size: 13, weight: .medium))
