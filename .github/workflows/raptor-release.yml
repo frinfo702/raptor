@@ -118,5 +118,11 @@ jobs:
           - run \`xattr -dr com.apple.quarantine /Applications/Raptor.app\`.
 
           Later versions install through Raptor → Check for Updates.
+
+          Global keybinds (\`keybind = global:...\`) need Accessibility access.
+          If Raptor keeps asking for it although it is enabled, the grant was
+          made for an older build: remove Raptor under System Settings →
+          Privacy & Security → Accessibility, launch Raptor and allow it once.
+          Later updates and local builds then share that grant.
           EOF
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
