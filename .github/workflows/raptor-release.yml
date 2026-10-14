@@ -45,8 +45,9 @@ jobs:
       - name: Upload DMG
         run: gh release upload "$TAG" "$DMG" --clobber --repo "$GITHUB_REPOSITORY"
 
-      # The app's updater reads appcast.xml from the latest release. Without
-      # the signing key the DMG still ships, just without an update feed.
+      # The app's updater reads appcast.xml from the fixed raptor-appcast
+      # prerelease, which never becomes Latest. Without the signing key the
+      # DMG still ships and the existing feed is left untouched.
       - name: Upload Sparkle appcast
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
@@ -61,7 +62,10 @@ jobs:
           curl -fsSL "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-for-Swift-Package-Manager.zip" > .action/sparkle/sparkle.zip
           unzip -q .action/sparkle/sparkle.zip -d .action/sparkle
           PATH="$PWD/.action/sparkle/bin:$PATH" dist/macos/raptor-appcast.sh "$TAG" "$DMG"
-          gh release upload "$TAG" appcast.xml --clobber --repo "$GITHUB_REPOSITORY"
+          gh release view raptor-appcast --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create raptor-appcast --prerelease --title "Raptor update feed" \
+              --notes "Sparkle appcast for Raptor's updater. Do not delete." --repo "$GITHUB_REPOSITORY"
+          gh release upload raptor-appcast appcast.xml --clobber --repo "$GITHUB_REPOSITORY"
 
       - name: Append install notes
         run: |
@@ -81,5 +85,7 @@ jobs:
           - Open Raptor once, then go to System Settings → Privacy & Security
             and click **Open Anyway**, or
           - run \`xattr -dr com.apple.quarantine /Applications/Raptor.app\`.
+
+          Later versions install through Raptor → Check for Updates.
           EOF
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
