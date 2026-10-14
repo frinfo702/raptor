@@ -38,9 +38,10 @@
 //! the memory. Unpacking moves the prefix to the front, then expands cell
 //! records forward, then moves the metadata down to its place and zeroes the
 //! tail. Each expansion writes behind the read cursor as long as the packed
-//! bytes still to be read never outnumber the raw bytes still to be written.
-//! `packedLen` checks that bound for every record and declines pages which
-//! break it, which only happens when cell rows are nearly incompressible.
+//! bytes still to be read never outnumber the raw bytes still to be written
+//! plus the zero tail. `packedLen` checks that bound at every record and
+//! declines pages which break it, which only happens when cell rows near the
+//! end of the page are nearly incompressible and the zero tail is short.
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
@@ -75,9 +76,10 @@ pub fn packedLen(page: *const TerminalPage) ?usize {
     if (page.rows.offset != 0 or page.cells.offset != geo.cells_start)
         return null;
 
-    // Sum the records and remember how far any prefix of them runs ahead of
-    // the raw cells it encodes. Unpacking reads that far ahead of where it
-    // writes; see the in-place notes above.
+    // Sum the records and remember how far the raw cells of any prefix of
+    // them run ahead of its packed bytes. Expanding that prefix moves the
+    // write cursor that much closer to the read cursor; see the in-place
+    // notes above.
     const memory = page.memory;
     var cells_len: usize = 0;
     var raw_len: usize = 0;
@@ -86,15 +88,17 @@ pub fn packedLen(page: *const TerminalPage) ?usize {
         const count, const width = scan(memory, geo.cellRow(y), geo.cols);
         cells_len += record_header_len + count * width.size();
         raw_len += geo.cols * @sizeOf(u64);
-        lead = @max(lead, cells_len -| raw_len);
+        lead = @max(lead, raw_len -| cells_len);
     }
 
     const meta_len = geo.metaLen(memory);
     const zeros = memory.len - geo.cells_end - meta_len;
 
     // Before the first record the read cursor is `slack` bytes ahead of the
-    // write cursor. Each record changes that by its packed length minus its
-    // raw length, so the worst point is `lead` bytes behind the start.
+    // write cursor, which is `slack - cells_len` with the image at the end
+    // of the memory. Each record changes that gap by its packed length minus
+    // its raw length, so the gap is narrowest, by `lead` bytes, after the
+    // prefix that expands the most.
     const slack = (geo.cells_end - geo.cells_start) + zeros;
     if (slack < cells_len + lead) return null;
 
@@ -166,8 +170,9 @@ pub fn unpack(
     }
 
     // Each value is read before its expanded word is written. `packedLen`
-    // proved the write cursor never passes the read cursor for images it
-    // accepts. Corrupt images may overwrite unread bytes but never escape
+    // proved the packed bytes left to read never outnumber the raw bytes
+    // left to write plus the zero tail, so for images it accepts the write
+    // cursor never passes the read cursor. Corrupt images may overwrite unread bytes but never escape
     // `memory`: reads are checked against its end below, and each record
     // writes exactly `cols` words, so `w` ends at `cells_end`.
     var w = geo.cells_start;
@@ -503,6 +508,26 @@ test "rowpack declines pages it cannot unpack in place" {
     // A zero byte at the end of the memory gives the unpacker room to read
     // ahead, so the same rows become packable once there is enough of it.
     page.memory[page.memory.len - 1] = 0;
+    const memory = try testRoundTrip(&page);
+    defer testing.allocator.free(memory);
+    try testing.expectEqualSlices(u8, page.memory, memory);
+}
+
+test "rowpack declines expanding rows after compressible ones" {
+    var page = try TerminalPage.init(.{ .cols = 8, .rows = 8, .styles = 0 });
+    defer page.deinit();
+
+    // Rows 0-3 are empty and pack to bare headers, so the page as a whole
+    // shrinks. Rows 4-7 need full words, and expanding the empty rows first
+    // brings the write cursor up to their records before they are read.
+    const cells = page.cells.ptr(page.memory)[4 * 8 .. 8 * 8];
+    for (cells, 0..) |*cell, i| {
+        cell.* = .init(@intCast('A' + i % 26));
+        cell.wide = .spacer_tail;
+    }
+    page.memory[page.memory.len - 1] = 1;
+
+    if (packedLen(&page) == null) return;
     const memory = try testRoundTrip(&page);
     defer testing.allocator.free(memory);
     try testing.expectEqualSlices(u8, page.memory, memory);
