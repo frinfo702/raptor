@@ -45,7 +45,7 @@ final class RaptorSmokeTests: XCTestCase {
 
         // Closing the window detaches: the session lives on.
         controller.window?.close()
-        XCTAssertNil(client.controllers[created.session])
+        XCTAssertFalse(client.controllers.contains { $0.session == created.session })
         let list: SessionList = try XCTUnwrap(client.call("session.list"))
         XCTAssertTrue(list.sessions.contains { $0.id == created.session })
         client.call("session.kill", ["session": created.session])
@@ -235,5 +235,102 @@ final class RaptorSmokeTests: XCTestCase {
                 }
             }
         }
+    }
+
+    private struct Size: Decodable, Equatable {
+        let cols: Int
+        let rows: Int
+    }
+
+    /// Two windows on one session: both show `rap split` live, and the block takes the
+    /// size of whichever window last focused it, since each window is its own client.
+    @MainActor
+    func testTwoWindowsOneSession() throws {
+        let socket = "/tmp/raptor-xctest-two-\(getpid()).sock"
+        let client = try XCTUnwrap(RaptorClient(socket: socket), "no server started from the bundled rap")
+        defer {
+            client.call("server.stop")
+            unlink(socket + ".lock")
+        }
+        let ghostty = try XCTUnwrap((NSApp.delegate as? AppDelegate)?.ghostty)
+        let created: Created = try XCTUnwrap(client.call("session.create", [
+            "command": ["/bin/sh", "-c", "exec sleep 60"],
+        ]))
+        defer { client.call("session.kill", ["session": created.session]) }
+        let a = client.open(ghostty, session: created.session)
+        let b = client.newWindow(ghostty, session: created.session)
+        defer {
+            a.window?.close()
+            b.window?.close()
+        }
+        XCTAssertEqual(client.controllers.filter { $0.session == created.session }.count, 2)
+        XCTAssertNotEqual(a.stream, b.stream, "the windows share a connection")
+        a.window?.setFrame(NSRect(x: 100, y: 100, width: 1000, height: 700), display: true)
+        b.window?.setFrame(NSRect(x: 200, y: 200, width: 600, height: 400), display: true)
+
+        func wait(_ what: String, until done: () -> Bool) {
+            let deadline = Date().addingTimeInterval(10)
+            while !done() && Date() < deadline {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
+            XCTAssertTrue(done(), what)
+        }
+
+        // The bundled CLI splits on the server; both windows show the new pane.
+        let rap = Process()
+        rap.executableURL = try XCTUnwrap(Bundle.main.url(forAuxiliaryExecutable: "rap"))
+        rap.arguments = ["-S", socket, "split", "-s", created.session, "--", "/bin/sleep", "60"]
+        try rap.run()
+        rap.waitUntilExit()
+        XCTAssertEqual(rap.terminationStatus, 0)
+        wait("rap split shows in both windows") {
+            Array(a.surfaceTree).count == 2 && Array(b.surfaceTree).count == 2
+        }
+
+        // Focus the same block in each window in turn: its size follows, and
+        // `rap events` names a different owner each time.
+        let block = try XCTUnwrap(a.surfaceTree.first.flatMap(a.block(of:)))
+        let events = Process()
+        let out = Pipe()
+        events.executableURL = rap.executableURL
+        events.arguments = ["-S", socket, "events"]
+        events.standardOutput = out
+        try events.run()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        func size() -> Size? { client.call("block.method", ["block": block, "method": "size"]) }
+        func focus(_ c: RaptorController) throws {
+            let pane = try XCTUnwrap(Array(c.surfaceTree).first { c.block(of: $0) == block })
+            Ghostty.moveFocus(to: pane)
+            // The test runner may not let the app take the keyboard, so make the
+            // window key the way AppKit tells it.
+            NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: c.window)
+        }
+        try focus(a)
+        var sizeA: Size?
+        wait("the block takes window A's size") {
+            sizeA = size()
+            return (sizeA?.cols ?? 0) > 50
+        }
+        try focus(b)
+        wait("focusing the pane in window B moves the size to B") {
+            guard let s = size(), let sizeA else { return false }
+            return s.cols < sizeA.cols && s.rows < sizeA.rows
+        }
+        try focus(a)
+        wait("and back to A") { size() == sizeA }
+
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        events.terminate()
+        events.waitUntilExit()
+        let text = String(bytes: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let owners = text.split(separator: "\n")
+            .filter { $0.contains("\"size_changed\"") && $0.contains(block) }
+            .compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }
+            .compactMap { $0["owner"] as? String }
+        print("size_changed owners for \(block): \(owners)")
+        // A may own the block already, so only the moves to B and back are certain.
+        let moves = Array(owners.suffix(2))
+        XCTAssertEqual(moves.count, 2, text)
+        XCTAssertNotEqual(moves.first, moves.last, "B and A are different owners: \(owners)")
     }
 }

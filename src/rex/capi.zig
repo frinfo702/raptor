@@ -96,6 +96,13 @@ export fn rap_client_unbind(client: *Client, surface: *embedded.Surface) void {
     if (surfaceBinding(client, surface)) |b| client.unbind(b);
 }
 
+/// Make the client the size owner of the surface's block, as focusing the
+/// surface does, for a surface that kept its focus while another window had
+/// the keyboard.
+export fn rap_client_claim(client: *Client, surface: *embedded.Surface) void {
+    if (surfaceBinding(client, surface)) |b| b.focus(true);
+}
+
 /// A headless surface: a mirror that is safe to read while the client's
 /// reader thread feeds it.
 const CMirror = struct {

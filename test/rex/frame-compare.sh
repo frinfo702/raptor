@@ -15,13 +15,19 @@
 #         divider #1E2226, 34 pt headers, #0B1212 when unfocused, the pane
 #         background when focused;
 #   fresh (default theme; Blended, islands, headers pinned to the default
-#         values so saved Settings can't leak in): islands with headers.
+#         values so saved Settings can't leak in): islands with headers;
+#   palette (bg #232831, accent #8060B5, vs v3_4fps_006.jpg): the command
+#         palette 330 pt wide, centred, 76 pt below the window top, 16 rows
+#         of 28 pt, #30343F, with shortcut glyphs at the rows' trailing edge;
+#   filtered (same, the query "spl", vs v3_crop_palette_filtered_t2.0.jpg):
+#         the first row filled with the accent, 26 pt tall;
+#   sessions (same): the session switcher under the session item.
 # Colours must be within 2/255 per channel, sizes within 1 pt.
 #
 # usage: test/rex/frame-compare.sh <Raptor.app> <rap> <outdir> [reference-frames-dir]
-# Needs ImageMagick (magick), Screen Recording and Accessibility permission for
-# the calling terminal, and no other Raptor running. With reference frames, it
-# also writes side-by-side images.
+# Needs ImageMagick (magick), Screen Recording permission for the calling
+# terminal, and no other Raptor running. With reference frames, it also writes
+# side-by-side images.
 set -eu
 
 app=$1
@@ -55,6 +61,11 @@ for w in list where (w[kCGWindowName as String] as? String) == CommandLine.argum
 }
 EOF
 swiftc -o "$tmp/win" "$tmp/win.swift" 2>/dev/null
+
+# The main screen's size in points, for the window frame given to the app.
+screen=$(swift -e 'import AppKit; let f = NSScreen.screens[0].frame; print(Int(f.width), Int(f.height))' 2>/dev/null)
+sw=${screen% *}
+sh=${screen#* }
 
 # The pixel at x,y of image $1 as RRGGBB.
 px() { magick "$1" -format "%[hex:p{$2,$3}]" info: | cut -c1-6; }
@@ -93,7 +104,7 @@ shoot() {
     name=$1
     sock=/tmp/raptor-fc-$$-$name.sock
     if [ -n "$2" ]; then
-        printf 'background = %s\nwindow-padding-x = 0\n' "$2" >"$tmp/config"
+        printf 'background = %s\npalette = 5=#8060B5\nwindow-padding-x = 0\n' "$2" >"$tmp/config"
     else
         : >"$tmp/config"
     fi
@@ -112,8 +123,12 @@ shoot() {
 
     # Let the panes' programs start before the app sizes them.
     sleep 1
+    # The window takes its frame from its autosave name, set here for this launch
+    # only: 1080x720 pt, 80 pt from the screen's top left.
+    sid=$("$rap" ls | awk -v n="fc-$name" '$1 == n { print $4 }')
     env "$@" XDG_CONFIG_HOME="$tmp/xdg-$name" GHOSTTY_CONFIG_PATH="$tmp/config" \
-        "$app/Contents/MacOS/raptor" >"$tmp/app-$name.log" 2>&1 &
+        "$app/Contents/MacOS/raptor" "-NSWindow Frame Raptor $sid" "80 $((sh - 800)) 1080 720 0 0 $sw $sh" \
+        >"$tmp/app-$name.log" 2>&1 &
     id=
     for _ in $(seq 1 60); do
         id=$("$tmp/win" "fc-$name")
@@ -125,13 +140,13 @@ shoot() {
         fail=1
         return
     }
-    osascript -e 'tell application "System Events" to tell (first application process whose name is "raptor")
-        set position of window 1 to {80, 80}
-        set size of window 1 to {1080, 720}
-    end tell' >/dev/null
-    sleep 1.5
+    sleep 2.5
     shot=$out/raptor-$name.png
     screencapture -x -o -l"$id" "$shot"
+    # The checks are in 2x pixels; a 1x display's shot is doubled, pixel for pixel.
+    if [ "$(magick identify -format %w "$shot")" -lt 2000 ]; then
+        magick "$shot" -filter point -resize 200% "$shot"
+    fi
     unset RAP_SERVER
     pkill -f "$app/Contents/MacOS/raptor" || true
     sleep 1
@@ -279,7 +294,69 @@ if [ -f "$img" ]; then
     within "fresh install has islands" "$(wc -l <"$tmp/edges" | tr -d ' ')" 0 4
 fi
 
+# The command palette, unfiltered, in the 2x screenshot $1.
+palette() {
+    img=$1
+    # Between the field and the first row the panel is plain popover colour.
+    runs "$img" 232 30343F >"$tmp/edges"
+    x0=$(head -n 1 "$tmp/edges" | cut -d' ' -f1)
+    x1=$(tail -n 1 "$tmp/edges" | cut -d' ' -f2)
+    # The run is inside a 1 pt border.
+    within "palette width (px at 2x)" $((x1 - x0 + 5)) 4 660
+    within "palette centre (px at 2x)" $(((x0 + x1) / 2)) 2 1080
+    near "palette" "$(px "$img" 1080 232)" 30343F
+    # Down the middle: the margins above the field and below the last row.
+    colruns "$img" 1080 30343F >"$tmp/edges"
+    y0=$(head -n 1 "$tmp/edges" | cut -d' ' -f1)
+    y1=$(tail -n 1 "$tmp/edges" | cut -d' ' -f2)
+    within "palette top (px at 2x)" $((y0 - 2)) 2 152
+    # 8 + 29 field + 7 + 16 rows of 28 + 6.
+    within "palette height (px at 2x)" $((y1 - y0 + 5)) 4 996
+    # Shortcut glyphs: ink near the rows' trailing edge.
+    ink=$(magick "$img" -crop 60x896+$((x1 - 80))+$((y0 + 86)) +repage -fill black -fuzz 3% -opaque "#30343F" \
+        -fill white +opaque black -format '%[fx:int(mean*w*h)]' info:)
+    if [ "$ink" -gt 200 ]; then echo "ok   trailing glyphs: $ink px of ink"; else
+        echo "FAIL trailing glyphs: $ink px of ink"
+        fail=1
+    fi
+}
+
+palette_env="RAPTOR_INTERFACE_STYLE=solid RAPTOR_PANE_DENSITY=compact RAPTOR_PANE_HEADERS=0"
+
+# shellcheck disable=SC2086
+shoot palette 232831 $palette_env RAPTOR_PALETTE_QUERY=
+img=$out/raptor-palette.png
+if [ -f "$img" ]; then
+    echo "palette: $(magick identify -format '%wx%h' "$img") px"
+    palette "$img"
+fi
+
+# shellcheck disable=SC2086
+shoot filtered 232831 $palette_env RAPTOR_PALETTE_QUERY=spl
+img=$out/raptor-filtered.png
+if [ -f "$img" ]; then
+    echo "filtered: $(magick identify -format '%wx%h' "$img") px"
+    # The first row, 44 pt into the panel, is filled with the accent, here
+    # between its title and its shortcut.
+    near "selected row" "$(px "$img" 1250 268)" 8060B5
+    a=$(colruns "$img" 1250 8060B5 | head -n 1)
+    within "selected row height (px at 2x)" $((${a#* } - ${a% *} + 1)) 2 52
+fi
+
+# shellcheck disable=SC2086
+shoot sessions 232831 $palette_env RAPTOR_SESSIONS=1
+img=$out/raptor-sessions.png
+if [ -f "$img" ]; then
+    echo "sessions: $(magick identify -format '%wx%h' "$img") px"
+    # Below its last row.
+    near "switcher" "$(px "$img" 300 318)" 30343F
+fi
+
 if [ -n "$refs" ]; then
+    magick "$out/raptor-palette.png" -resize 1200x "$refs/v3_4fps_006.jpg" -resize 1200x -append \
+        -quality 85 "$out/side-by-side-palette.jpg"
+    magick "$out/raptor-filtered.png" -crop 900x400+630+80 +repage "$refs/v3_crop_palette_filtered_t2.0.jpg" -append \
+        -quality 85 "$out/side-by-side-filtered.jpg"
     magick "$out/raptor-islands.png" -resize 1200x "$refs/v1_4fps_001.jpg" -resize 1200x -append \
         -quality 85 "$out/side-by-side-islands.jpg"
     magick "$out/raptor-compact.png" -resize 1200x "$refs/v2_4fps_049.jpg" -resize 1200x -append \

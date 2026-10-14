@@ -58,6 +58,9 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
     @FocusedValue(\.ghosttySurfacePwd) private var surfacePwd
     @FocusedValue(\.ghosttySurfaceCellSize) private var cellSize
 
+    /// False when the window draws its own command palette.
+    @Environment(\.terminalCommandPalette) private var showsCommandPalette
+
     // The pwd of the focused surface as a URL
     private var pwdURL: URL? {
         guard let surfacePwd, surfacePwd != "" else { return nil }
@@ -107,7 +110,7 @@ struct TerminalView<ViewModel: TerminalViewModel>: View {
                 // Ignore safe area to extend up in to the titlebar region if we have the "hidden" titlebar style
                 .ignoresSafeArea(.container, edges: ghostty.config.macosTitlebarStyle == .hidden ? .top : [])
 
-                if let surfaceView = lastFocusedSurface?.value {
+                if showsCommandPalette, let surfaceView = lastFocusedSurface?.value {
                     TerminalCommandPaletteView(
                         surfaceView: surfaceView,
                         isPresented: $viewModel.commandPaletteIsShowing,
@@ -176,5 +179,17 @@ struct DebugBuildWarningView: View {
         .onTapGesture {
             isPopover = true
         }
+    }
+}
+
+private struct TerminalCommandPaletteKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    /// Whether TerminalView shows Ghostty's command palette.
+    var terminalCommandPalette: Bool {
+        get { self[TerminalCommandPaletteKey.self] }
+        set { self[TerminalCommandPaletteKey.self] = newValue }
     }
 }

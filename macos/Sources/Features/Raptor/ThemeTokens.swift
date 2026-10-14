@@ -14,9 +14,13 @@ struct ThemeTokens {
     let separator: NSColor
     /// The border around island cards.
     let islandBorder: NSColor
+    /// Popovers: the command palette and the session switcher.
+    let popover: NSColor
+    let popoverBorder: NSColor
+    /// A search field inside a popover.
+    let field: NSColor
     let isLight: Bool
 
-    // Popover and field tokens come with the UI that uses them.
     init(background: NSColor) {
         isLight = background.isLightColor
         let lab = OKLab(background)
@@ -26,6 +30,9 @@ struct ThemeTokens {
         hairline = lab.shifted(0.06 * s)
         separator = lab.shifted(0.13 * s)
         islandBorder = lab.shifted(0.08 * s)
+        popover = lab.shifted(0.055 * s)
+        popoverBorder = lab.shifted(0.1 * s)
+        field = lab.shifted(0.125 * s)
     }
 }
 
