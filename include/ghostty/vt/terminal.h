@@ -3154,9 +3154,16 @@ GHOSTTY_API GhosttyResult ghostty_terminal_compression_activity(
  *
  * Compression is opportunistic. Complete means the pass has finished, not
  * that every page was compressed: pages may be unprofitable or encounter an
- * allocation or reclamation failure. Compression changes only the terminal's
- * storage representation and never its logical contents or scrollback limit.
- * Accessing compressed history restores it transparently.
+ * allocation or reclamation failure. Accessing compressed history restores it
+ * transparently.
+ *
+ * Compression may first move the scrollback rows held by the page containing
+ * the active area into their own pages so they can be compressed. This
+ * invalidates grid refs and untracked pins into the active area; tracked pins
+ * follow their rows. Because those history pages are charged against the byte
+ * scrollback limit, a call may prune the oldest scrollback page when the
+ * terminal is over that limit. The configured limit itself never changes, and
+ * none of this changes ghostty_terminal_compression_activity().
  *
  * This function is not thread-safe with other operations on the same
  * terminal. The caller must serialize it with writes, rendering, searches,

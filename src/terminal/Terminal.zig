@@ -2906,6 +2906,15 @@ pub const CompressionResult = lib.Enum(lib.target, &.{
 ///
 /// Callers should schedule compression when it doesn't impact user
 /// experience, for example during idle times.
+///
+/// Compression may first move the scrollback rows held by the page
+/// containing the active area into their own pages so they can be
+/// compressed. This invalidates grid refs and untracked pins into the
+/// active area; tracked pins follow their rows. Because those history
+/// pages are charged against the byte scrollback limit, a call may prune
+/// the oldest scrollback page when the terminal is over that limit. The
+/// configured limit itself never changes, and none of this changes
+/// `compressionActivity`.
 pub fn compress(
     self: *Terminal,
     mode: CompressionMode,
