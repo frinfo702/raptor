@@ -93,6 +93,35 @@ pub fn init(
         break :build step;
     };
 
+    // An ad-hoc signature's default designated requirement is its cdhash,
+    // so macOS privacy grants (Accessibility, needed by global keybinds)
+    // stop matching after every rebuild. Pin it to the bundle id instead.
+    // Only the outer bundle: nested code must keep its own requirement.
+    const pin_requirement = pin: {
+        const bundle_id = switch (config.optimize) {
+            .debug => "com.frinfo702.raptor.debug",
+            .safe, .small, .fast => "com.frinfo702.raptor",
+        };
+        const step = RunStep.create(b, "pin designated requirement");
+        step.has_side_effects = true;
+        step.cwd = b.path("");
+        step.addArgs(&.{
+            "codesign",
+            "--force",
+            "--sign",
+            "-",
+            "--preserve-metadata=entitlements,flags",
+            "--requirements",
+            b.fmt("=designated => identifier \"{s}\"", .{bundle_id}),
+            app_path,
+        });
+        step.expectExitCode(0);
+        // Swallow codesign's "replacing existing signature" notice.
+        _ = step.captureStdErr(.{});
+        step.step.dependOn(&build.step);
+        break :pin step;
+    };
+
     const xctest = xctest: {
         const env_map = try b.allocator.create(std.process.Environ.Map);
         env_map.* = .init(b.allocator);
@@ -141,7 +170,7 @@ pub fn init(
             b.fmt("{s}/Contents/Info.plist", .{app_path}),
         });
         disable_save_state.expectExitCode(0);
-        disable_save_state.step.dependOn(&build.step);
+        disable_save_state.step.dependOn(&pin_requirement.step);
 
         const open = RunStep.create(b, "run Ghostty app");
         open.has_side_effects = true;
@@ -174,7 +203,7 @@ pub fn init(
         step.addArgs(&.{ "cp", "-R" });
         step.addFileArg(b.path(app_path));
         step.addDirectoryArg2(b.graph.path(.install_prefix, ""), .{});
-        step.step.dependOn(&build.step);
+        step.step.dependOn(&pin_requirement.step);
         break :copy step;
     };
 

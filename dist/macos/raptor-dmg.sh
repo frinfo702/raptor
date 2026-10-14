@@ -39,6 +39,11 @@ app=zig-out/Raptor.app
 # Ad-hoc signature: no Apple Developer account needed, but Gatekeeper
 # will still ask the user to approve the app on first launch.
 codesign --force --deep --sign - "$app"
+# An ad-hoc signature's default designated requirement is its cdhash, so
+# macOS privacy grants (Accessibility for global keybinds) would not
+# survive an update. Pin it to the bundle id instead, as Xcode does.
+codesign --force --sign - \
+  --requirements '=designated => identifier "com.frinfo702.raptor"' "$app"
 codesign --verify --deep --strict "$app"
 
 staging="$(mktemp -d)"
