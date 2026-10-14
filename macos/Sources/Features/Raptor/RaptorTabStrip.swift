@@ -59,6 +59,15 @@ struct RaptorTabView: View {
         return (program, String(title.dropFirst(program.count)))
     }
 
+    /// Whether a window's label is the one rap gave it ("Primary", else "Window" and its
+    /// id's last 8 characters) rather than a name from Rename Tab.
+    /// ponytail: a tab renamed to exactly its default reads as unnamed; a flag from the
+    /// server would settle it.
+    static func isDefaultLabel(_ label: String?, window id: String) -> Bool {
+        guard let label, !label.isEmpty else { return true }
+        return label == "Primary" || label == "Window \(id.suffix(8))"
+    }
+
     var body: some View {
         let parts = Self.titleParts(tab.title, program: tab.program.name)
         HStack(spacing: 12) {

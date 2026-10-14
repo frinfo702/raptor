@@ -117,6 +117,9 @@ struct RaptorTileCluster: View {
     /// Picks a card's light-theme art.
     let light: Bool
 
+    /// The front tile's lean, measured from the captain's close-up of Rex's tab.
+    static let tilt = -5.0
+
     var body: some View {
         HStack(spacing: 0) {
             Group {
@@ -133,11 +136,17 @@ struct RaptorTileCluster: View {
                         .background(RoundedRectangle(cornerRadius: 5).fill(program.tile))
                 }
             }
+            // Rex leans the front tile a few degrees, lifted by a soft shadow.
+            .rotationEffect(.degrees(Self.tilt))
+            .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
             .zIndex(1)
+            // Each pane behind it peeks out 6 pt, shorter and darker the further back.
             ForEach(Array(others.prefix(2).enumerated()), id: \.offset) { i, other in
-                RoundedRectangle(cornerRadius: 3)
+                RoundedRectangle(cornerRadius: 4)
                     .fill(other.glyph)
-                    .frame(width: 8, height: 18 - CGFloat(i + 1) * 3)
+                    .brightness(-0.15 * Double(i))
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.black.opacity(0.35), lineWidth: 0.5))
+                    .frame(width: 10, height: i == 0 ? 16 : 13.5)
                     .padding(.leading, -4)
                     .zIndex(-Double(i))
             }

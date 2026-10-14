@@ -61,3 +61,21 @@ struct RaptorTabTitleTests {
         #expect(RaptorTabView.titleParts("Stress-test Snake demo", program: "Codex") == ("Stress-test Snake demo", ""))
     }
 }
+
+/// rap names every window; only a name from Rename Tab replaces the program title.
+struct RaptorTabLabelTests {
+    private let id = "window:01a13804-5407-744d-a5e0-773af9b8d402"
+
+    @Test func defaultLabelsGiveWayToTheProgramTitle() {
+        #expect(RaptorTabView.isDefaultLabel("Primary", window: id))
+        #expect(RaptorTabView.isDefaultLabel("Window f9b8d402", window: id))
+        #expect(RaptorTabView.isDefaultLabel(nil, window: id))
+        #expect(RaptorTabView.isDefaultLabel("", window: id))
+    }
+
+    @Test func renamedTabsKeepTheirName() {
+        #expect(!RaptorTabView.isDefaultLabel("Snake", window: id))
+        // Another window's default is a real name here.
+        #expect(!RaptorTabView.isDefaultLabel("Window 12345678", window: id))
+    }
+}

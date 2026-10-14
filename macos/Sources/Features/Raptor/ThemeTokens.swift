@@ -6,8 +6,6 @@ import AppKit
 struct ThemeTokens {
     /// The title bar.
     let chrome: NSColor
-    /// The active tab's pill.
-    let tabActive: NSColor
     /// Hairlines and split dividers.
     let hairline: NSColor
     /// Separators between inactive tabs on light themes.
@@ -26,7 +24,6 @@ struct ThemeTokens {
         let lab = OKLab(background)
         let s = isLight ? -1.0 : 1.0
         chrome = lab.shifted(-0.016 * s)
-        tabActive = lab.shifted(0.03 * s)
         hairline = lab.shifted(0.06 * s)
         separator = lab.shifted(0.13 * s)
         islandBorder = lab.shifted(0.08 * s)
