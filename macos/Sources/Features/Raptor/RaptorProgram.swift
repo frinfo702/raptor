@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// How Raptor shows a pane's foreground program: a friendly name and an icon, drawn
-/// plain in pane headers and on a tinted tile in tabs.
+/// plain in pane headers and, in tabs, as the program's card or else on a tinted tile.
 ///
-/// ponytail: SF Symbols and text glyphs stand in for program logos until the final icon art.
+/// ponytail: SF Symbols and text glyphs stand in for program logos in pane headers and
+/// on tiles for programs without a card.
 struct RaptorProgram: Equatable {
     enum Icon: Equatable {
         case symbol(String)
