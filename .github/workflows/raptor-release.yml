@@ -85,6 +85,7 @@ jobs:
           security list-keychains -d user -s "$keychain" \
             $(security list-keychains -d user | tr -d '"')
           rm -f "$p12"
+          echo "RAPTOR_REQUIRE_IDENTITY=1" >> "$GITHUB_ENV"
 
       - name: Build DMG
         run: |

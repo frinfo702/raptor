@@ -10,7 +10,9 @@
 # one (or if signing with it fails) the app is ad-hoc signed, whose
 # default requirement is its cdhash and changes on every build, so the
 # requirement is pinned to the bundle id alone. Any app can claim that
-# id, so the fallback is weaker and prints a warning.
+# id, so the fallback is weaker and prints a warning. With
+# RAPTOR_REQUIRE_IDENTITY=1 (release CI with the certificate imported)
+# the script fails instead of falling back.
 set -euo pipefail
 
 app="${1:?usage: raptor-sign.sh <app> <bundle id> [identity SHA-1]}"
@@ -47,5 +49,9 @@ else
   reason="codesign with identity $identity failed"
 fi
 
+if [ "${RAPTOR_REQUIRE_IDENTITY:-}" = 1 ]; then
+  echo "::error::$reason; refusing to ad-hoc sign $app because RAPTOR_REQUIRE_IDENTITY=1" >&2
+  exit 1
+fi
 echo "warning: $reason; ad-hoc signing $app. Accessibility grants then match any app claiming $bundle_id." >&2
 sign - "identifier \"$bundle_id\""
