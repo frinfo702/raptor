@@ -59,8 +59,7 @@ jobs:
             echo "::warning::SPARKLE_PRIVATE_KEY is not set; skipping appcast.xml, so installed apps will not see $TAG as an update"
             exit 0
           fi
-          git fetch --force --tags --quiet origin
-          newest="$(git tag -l 'raptor-v*' --sort=-v:refname | head -1)"
+          newest="$(git ls-remote --tags --refs origin 'raptor-v*' | sed 's#.*refs/tags/##' | sort -V | tail -1)"
           if [ "$TAG" != "$newest" ]; then
             echo "::notice::$TAG is not the newest Raptor release ($newest); leaving appcast.xml untouched"
             exit 0
