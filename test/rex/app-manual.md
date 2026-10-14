@@ -72,9 +72,9 @@ reference frames (title bar height, tab pill size, island inset, gutter and
 radius, header colours, theme token colours, palette width, position, rows and
 accent row) and writes side-by-side images to its output directory. It needs
 Screen Recording permission for the terminal running it, but not
-Accessibility: it sizes the window through the app's frame autosave. Run it on a release build
-(`zig build -Doptimize=ReleaseFast`): debug builds show a banner above the
-panes that moves them down.
+Accessibility: it sizes the window through the app's frame autosave. Run it on
+a release build (`zig build -Doptimize=ReleaseFast`): debug builds show a
+banner above the panes that moves them down.
 
 ## Appearance
 
@@ -128,4 +128,3 @@ window, which only detaches. Close Session in the palette always asks.
    at that window's size (`$RAP block call -b <block> size` shows it).
 
 The XCTest `testTwoWindowsOneSession` checks steps 3 and 4.
-
