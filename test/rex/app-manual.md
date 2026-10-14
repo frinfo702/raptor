@@ -68,13 +68,13 @@ cd macos && xcodebuild test -scheme Ghostty -skip-testing GhosttyUITests \
 
 `test/rex/frame-compare.sh` checks the title bar, islands and compact panes
 with headers, the command palette and the session switcher against Rex's
-reference frames (title bar height, tab pill size, island inset, gutter and
-radius, header colours, theme token colours, palette width, position, rows and
-accent row) and writes side-by-side images to its output directory. It needs
-Screen Recording permission for the terminal running it, but not
-Accessibility: it sizes the window through the app's frame autosave. Run it on
-a release build (`zig build -Doptimize=ReleaseFast`): debug builds show a
-banner above the panes that moves them down.
+reference frames (title bar height, tab track, pill and divider sizes, island
+inset, gutter and radius, header colours, theme token colours, palette width,
+position, rows and accent row) and writes side-by-side images to its output
+directory. It needs Screen Recording permission for the terminal running it,
+but not Accessibility: it sizes the window through the app's frame autosave.
+Run it on a release build (`zig build -Doptimize=ReleaseFast`): debug builds
+show a banner above the panes that moves them down.
 
 ## Appearance
 
