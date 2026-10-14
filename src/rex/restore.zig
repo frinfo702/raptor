@@ -13,7 +13,9 @@ const Block = @import("Block.zig");
 /// drops whole pages, so from then on the restored terminal would keep
 /// up to a page fewer of the oldest lines than the server. Giving that
 /// page the capacity a live terminal gives its pages keeps both terminals'
-/// pages, and so their pruning, in step.
+/// pages, and so their pruning, in step until the server's idle compression
+/// next splits its active page (see `protocol`): from then on they may drop
+/// their oldest page at different times.
 pub fn decode(
     alloc: Allocator,
     io: std.Io,

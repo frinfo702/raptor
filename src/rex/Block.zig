@@ -744,6 +744,26 @@ test "rex Block: default scrollback keeps 10,000 lines at 80 columns" {
     try testing.expect(pages.total_rows >= 10_000 + pages.rows);
 }
 
+test "rex Block: default scrollback keeps 10,000 lines when idle compression splits pages" {
+    const testing = std.testing;
+    var pages: terminal.PageList = try .init(testing.allocator, .{
+        .cols = 80,
+        .rows = 24,
+        .max_size = default_max_scrollback_bytes,
+    });
+    defer pages.deinit();
+
+    // Output in short bursts, each followed by idle compression.
+    for (0..30_000) |i| {
+        _ = try pages.grow();
+        if (i % 50 == 0) {
+            _ = pages.splitBoundary();
+            _ = pages.compress(.full);
+        }
+        if (i >= 12_000) try testing.expect(pages.total_rows >= 10_000 + pages.rows);
+    }
+}
+
 test "rex Block: kill frees a block whose descendant keeps the pty open" {
     if (comptime builtin.target.os.tag == .windows) return error.SkipZigTest;
     const testing = std.testing;

@@ -2910,7 +2910,12 @@ pub fn compress(
     self: *Terminal,
     mode: CompressionMode,
 ) CompressionResult {
-    const pages = &self.screens.get(.primary).?.pages;
+    const screen = self.screens.get(.primary).?;
+    const pages = &screen.pages;
+
+    // History in the page holding the active area only becomes cold once it
+    // moves out of that page.
+    screen.splitBoundary();
     const result = switch (mode) {
         .incremental => pages.compress(.incremental),
         .full => pages.compress(.full),
@@ -17078,4 +17083,78 @@ test "Terminal: eraseDisplay complete ignores stale prompt on recycled row" {
     t.eraseDisplay(.complete, false);
 
     try testing.expectEqual(t.screens.active.pages.rows, t.screens.active.pages.total_rows);
+}
+
+fn formatVtForTest(alloc: Allocator, screen: *const Screen) ![]const u8 {
+    const formatter = @import("formatter.zig");
+    var builder: std.Io.Writer.Allocating = .init(alloc);
+    errdefer builder.deinit();
+    var f: formatter.ScreenFormatter = .init(screen, .vt);
+    f.extra = .all;
+    try f.format(&builder.writer);
+    return try builder.toOwnedSlice();
+}
+
+test "Terminal: compress moves history off the active page intact" {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 20, .rows = 5, .max_scrollback_bytes = null });
+    defer t.deinit(alloc);
+    var s = t.vtStream();
+    defer s.deinit();
+
+    for (0..30) |_| s.nextSlice("\x1b[1;31mred\x1b[0m e\u{301} 日本 \x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\\r\n");
+    // A wide character wrapping from the last history row into the first
+    // active row, and a cursor with a style and a hyperlink.
+    s.nextSlice("xxxxxxxxxxxxxxxxxxx中\r\nA\r\nB\r\nC\r\n\x1b[4;32m\x1b]8;id=c;https://cursor.example\x1b\\D");
+
+    const screen = t.screens.active;
+    const before = try formatVtForTest(alloc, screen);
+    defer alloc.free(before);
+    const activity = t.compressionActivity();
+    const boundary = screen.pages.getTopLeft(.active).node;
+
+    try testing.expectEqual(.complete, t.compress(.full));
+    const active = screen.pages.getTopLeft(.active);
+    try testing.expect(active.node != boundary);
+    try testing.expectEqual(0, active.y);
+    try testing.expectEqual(1, screen.pages.memoryStats().compressed_pages);
+    try testing.expectEqual(activity, t.compressionActivity());
+
+    const after = try formatVtForTest(alloc, screen);
+    defer alloc.free(after);
+    try testing.expectEqualStrings(before, after);
+
+    // The cursor's style and hyperlink live on its new page.
+    s.nextSlice("E");
+    const cell = screen.pages.getCell(.{ .active = .{ .x = 1, .y = 4 } }).?;
+    try testing.expectEqual(@as(u21, 'E'), cell.cell.content.codepoint.data);
+    try testing.expect(cell.style().flags.underline == .single);
+    const page = cell.node.page();
+    const link = page.hyperlink_set.get(page.memory, page.lookupHyperlink(cell.cell).?);
+    try testing.expectEqualStrings("https://cursor.example", link.uri.slice(page.memory));
+}
+
+test "Terminal: compress keeps a selection across the history split" {
+    const alloc = testing.allocator;
+    var t = try init(testing.io, alloc, .{ .cols = 10, .rows = 5, .max_scrollback_bytes = null });
+    defer t.deinit(alloc);
+    for (0..20) |i| {
+        var buf: [16]u8 = undefined;
+        try t.printString(try std.fmt.bufPrint(&buf, "line {d}\r\n", .{i}));
+    }
+
+    const screen = t.screens.active;
+    try screen.select(.init(
+        screen.pages.pin(.{ .screen = .{ .y = 10 } }).?,
+        screen.pages.pin(.{ .active = .{ .x = 5, .y = 2 } }).?,
+        false,
+    ));
+    const before = try screen.selectionString(alloc, .{ .sel = screen.selection.? });
+    defer alloc.free(before);
+
+    _ = t.compress(.full);
+    try testing.expectEqual(1, screen.pages.memoryStats().compressed_pages);
+    const after = try screen.selectionString(alloc, .{ .sel = screen.selection.? });
+    defer alloc.free(after);
+    try testing.expectEqualStrings(before, after);
 }

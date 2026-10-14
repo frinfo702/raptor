@@ -8,6 +8,7 @@ const testing = std.testing;
 const Mirror = @import("Mirror.zig");
 const Server = @import("Server.zig");
 const protocol = @import("protocol.zig");
+const terminal = @import("../terminal/main.zig");
 
 const alloc = testing.allocator;
 
@@ -176,15 +177,42 @@ fn waitText(conn: *Conn, block: []const u8, needle: []const u8) !u64 {
     return error.Timeout;
 }
 
-/// Expect every mirror to hold exactly the server's text at the same seq.
-fn expectMirrors(conn: *Conn, block: []const u8, mirrors: []const *Mirror) !void {
+/// How closely mirrors must hold the server's text.
+const Parity = enum {
+    /// Exactly, while the byte limit hasn't pruned any scrollback.
+    exact,
+    /// Once the byte limit prunes, everything but the oldest page. The
+    /// server's idle compression moves scrollback out of the page holding
+    /// the active area (`PageList.splitBoundary`), which mirrors don't see,
+    /// so the server and its mirrors may drop their oldest page at different
+    /// times.
+    pruned,
+};
+
+/// Expect every mirror to hold the server's text at the same seq.
+fn expectMirrors(
+    conn: *Conn,
+    block: []const u8,
+    mirrors: []const *Mirror,
+    parity: Parity,
+) !void {
     const f = try format(conn, block, true);
     defer alloc.free(f.text);
     for (mirrors) |m| {
         try testing.expectEqual(f.seq, m.feed.seq);
         const text = try m.plainAll(alloc);
         defer alloc.free(text);
-        try testing.expectEqualStrings(f.text, text);
+        if (parity == .exact or std.mem.eql(u8, f.text, text)) {
+            try testing.expectEqualStrings(f.text, text);
+            continue;
+        }
+
+        // One holds a few more of the oldest rows, at most a page.
+        const short, const long = if (f.text.len < text.len) .{ f.text, text } else .{ text, f.text };
+        try testing.expect(std.mem.endsWith(u8, long, short));
+        const cols = m.term.?.cols;
+        const page_rows = (try terminal.page.std_capacity.adjust(.{ .cols = cols })).rows;
+        try testing.expect(std.mem.count(u8, long[0 .. long.len - short.len], "\n") <= page_rows);
     }
 }
 
@@ -238,7 +266,7 @@ test "rex data plane: mirrors, reconnect, reset, and owner resize" {
     const done = try waitText(&a, block, "10000 the quick");
     try a.syncTo(&ma, done);
     try b.syncTo(&mb, done);
-    try expectMirrors(&a, block, &.{ &ma, &mb });
+    try expectMirrors(&a, block, &.{ &ma, &mb }, .exact);
     const all = try ma.plainAll(alloc);
     defer alloc.free(all);
     try testing.expect(std.mem.count(u8, all, "\n") >= 10_000);
@@ -259,13 +287,13 @@ test "rex data plane: mirrors, reconnect, reset, and owner resize" {
     try testing.expect(a2.seen.items.len > 0);
     try testing.expectEqual(0, countSnaps(&a2));
     try testing.expectEqual(1, ma.feed.snapshots);
-    try expectMirrors(&a2, block, &.{ &ma, &mb });
+    try expectMirrors(&a2, block, &.{ &ma, &mb }, .exact);
 
     // A reset resends every stream as a snapshot.
     (try a2.call("block.method", .{ .block = block, .method = "reset" })).deinit();
     while (ma.feed.snapshots < 2) if (try a2.readOne()) |p| alloc.free(p);
     while (mb.feed.snapshots < 2) if (try b.readOne()) |p| alloc.free(p);
-    try expectMirrors(&a2, block, &.{ &ma, &mb });
+    try expectMirrors(&a2, block, &.{ &ma, &mb }, .exact);
 
     // B sent input last, so it owns the size and A's request waits until
     // A focuses the block.
@@ -281,9 +309,13 @@ test "rex data plane: mirrors, reconnect, reset, and owner resize" {
     while (mb.term.?.cols != 50) if (try b.readOne()) |p| alloc.free(p);
     try testing.expectEqual(protocol.FrameType.grid, b.seen.items[b.seen.items.len - 1]);
     try testing.expectEqual(30, mb.term.?.rows);
-    try expectMirrors(&a2, block, &.{ &ma, &mb });
-    // The 70-column lines now wrap.
-    try testing.expect(ma.term.?.screens.active.pages.total_rows != rows_before);
+    // The 70-column lines now wrap, which takes the scrollback past the
+    // byte limit. Resizing doesn't prune, but the server's idle compression
+    // may enforce the limit before the mirrors' next page does.
+    const pages = &ma.term.?.screens.active.pages;
+    try testing.expect(pages.total_rows != rows_before);
+    try testing.expect(pages.page_size > pages.limits.max(.bytes));
+    try expectMirrors(&a2, block, &.{ &ma, &mb }, .pruned);
 }
 
 test "rex data plane: a stalled client neither delays others nor stays stale" {
@@ -331,5 +363,5 @@ test "rex data plane: a stalled client neither delays others nor stays stale" {
     // B catches up from a fresh snapshot once it reads again.
     while (mb.feed.snapshots < 2) if (try b.readOne()) |p| alloc.free(p);
     try b.syncTo(&mb, seq);
-    try expectMirrors(&a, block, &.{ &ma, &mb });
+    try expectMirrors(&a, block, &.{ &ma, &mb }, .pruned);
 }

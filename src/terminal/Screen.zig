@@ -659,7 +659,20 @@ pub fn increaseCapacity(
     // capacity below it will be short the ref count on our
     // current style and hyperlink, so we need to init those.
     const new_node = try self.pages.increaseCapacity(node, adjustment);
-    const new_page: *Page = new_node.page();
+    self.cursorPageReplaced();
+    return new_node;
+}
+
+/// Move the scrollback out of the page holding the active area so that
+/// compression can reclaim it. See `PageList.splitBoundary`.
+pub fn splitBoundary(self: *Screen) void {
+    if (self.pages.splitBoundary()) self.cursorPageReplaced();
+}
+
+/// Repair the cursor after PageList cloned its row into a new page, which
+/// holds no refs for the cursor's style and hyperlink.
+fn cursorPageReplaced(self: *Screen) void {
+    const new_page: *Page = self.cursor.page_pin.node.page();
 
     // Re-add the style, if the page somehow doesn't have enough
     // memory to add it, we emit a warning and gracefully degrade
@@ -671,7 +684,7 @@ pub fn increaseCapacity(
         ) catch |err| id: {
             // TODO: Should we increase the capacity further in this case?
             log.warn(
-                "(Screen.increaseCapacity) Failed to add cursor style back to page, err={}",
+                "Failed to add cursor style back to page, err={}",
                 .{err},
             );
 
@@ -693,7 +706,7 @@ pub fn increaseCapacity(
         self.startHyperlinkOnce(link.*) catch |err| {
             // TODO: Should we increase the capacity further in this case?
             log.warn(
-                "(Screen.increaseCapacity) Failed to add cursor hyperlink back to page, err={}",
+                "Failed to add cursor hyperlink back to page, err={}",
                 .{err},
             );
         };
@@ -706,8 +719,6 @@ pub fn increaseCapacity(
     // Reload the cursor information because the pin changed.
     // So our page row/cell and so on are all off.
     self.cursorReload();
-
-    return new_node;
 }
 
 /// Clone the cells in columns [x_start, x_end) of a source row into

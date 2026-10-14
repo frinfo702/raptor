@@ -3789,9 +3789,10 @@ pub fn split(
     self.invalidateNodeLayout(original_node);
     self.page_compression.markActivity();
 
-    // Move any tracked pins from the copied rows
+    // Move any tracked pins from the copied rows. Compare nodes rather
+    // than pages so pins into compressed history don't restore it.
     for (self.tracked_pins.keys()) |tracked| {
-        if (tracked.node.page() != page or
+        if (tracked.node != original_node or
             tracked.y < p.y) continue;
 
         tracked.node = target;
@@ -3808,6 +3809,147 @@ pub fn split(
     page.size.rows -= y_end - y_start;
 
     self.pages.insertAfter(original_node, target);
+}
+
+/// Move the history rows out of the boundary page, the page holding the top
+/// of the active area, so that `compress` can reclaim them. Compression never
+/// touches the boundary page because its active rows stay resident, so
+/// without this up to a whole page of history stays uncompressed.
+///
+/// The active rows move to a new page with the boundary page's capacity (see
+/// `split`), so the boundary page's memory is released as a whole. Its history
+/// rows first top up the newest history page to a standard page's rows, and
+/// any rest form a page of their own. Both are exact size: history pages keep
+/// the row boundaries they would have had without this, and the byte limit
+/// charges them for their contents rather than for a whole page.
+///
+/// This acts only when compression is supported and the boundary page is the
+/// last page, is resident, holds at least a screenful of history, and is not
+/// scrolled into view. It returns whether it moved any rows. Tracked pins follow their rows, but the
+/// active rows change pages, which invalidates untracked pins and row or cell
+/// pointers into them, as well as page-scoped IDs held for them, such as a
+/// screen cursor's style and hyperlink (`Screen.splitBoundary` handles the
+/// cursor). Like compression, call this when idle rather than per write.
+pub fn splitBoundary(self: *PageList) bool {
+    // Without compression, splitting only costs.
+    if (!terminal_mem.canReclaim(.strict)) return false;
+
+    const active = self.getTopLeft(.active);
+    const node = active.node;
+
+    // A boundary page followed by another page becomes ordinary history after
+    // at most a screen more output. Splitting it would strand its active rows
+    // in a page that never grows.
+    if (node != self.pages.last.?) return false;
+
+    // Restoring a compressed boundary page to split it costs more than it saves.
+    if (node.pageIfResident() == null) return false;
+
+    // Splitting copies the active rows and rewrites the newest history page,
+    // so wait for at least a screenful of history.
+    if (active.y < self.rows) return false;
+
+    // Visible history stays resident.
+    if (!self.getTopLeft(.viewport).eql(active)) return false;
+
+    defer self.assertIntegrity();
+
+    // Moving rows for compression isn't activity that needs more compression.
+    const activity = self.page_compression.activity_serial;
+    defer self.page_compression.activity_serial = activity;
+
+    // `node` keeps the history rows.
+    self.split(active) catch return false;
+    const page = node.page();
+    const rows = page.size.rows;
+
+    // Build the new history pages before changing the list. If that fails,
+    // the history stays in `node`, which is now an ordinary cold page.
+    var prev: ?*List.Node = null;
+    var joined: ?*List.Node = null;
+    var start: size.CellCountInt = 0;
+    if (node.prev) |p| top_up: {
+        const std_rows = initialCapacity(self.cols).rows;
+        if (p.rows() >= std_rows or p.cols() != page.size.cols) break :top_up;
+        const n = @min(rows, std_rows - p.rows());
+        joined = self.cloneExact(p.page(), page, 0, n) orelse break :top_up;
+        prev = p;
+        start = n;
+    }
+    const rest: ?*List.Node = if (start == rows) null else self.cloneExact(
+        null,
+        page,
+        start,
+        rows,
+    ) orelse {
+        if (joined) |n| self.destroyNode(n);
+        return true;
+    };
+
+    for (self.tracked_pins.keys()) |p| {
+        if (prev != null and p.node == prev.?) {
+            p.node = joined.?;
+        } else if (p.node == node and p.y < start) {
+            p.node = joined.?;
+            p.y += prev.?.rows();
+        } else if (p.node == node) {
+            p.node = rest.?;
+            p.y -= start;
+        }
+    }
+
+    if (prev) |p| {
+        self.pages.insertBefore(p, joined.?);
+        self.pages.remove(p);
+        self.destroyNode(p);
+    }
+    if (rest) |n| self.pages.insertBefore(node, n);
+    self.pages.remove(node);
+    self.destroyNode(node);
+
+    // Exact pages charge the history rows apart from the new active page.
+    self.limits.enforce(self, .bytes);
+    return true;
+}
+
+/// Create a detached exact-size page holding all of `prefix`'s rows, if any,
+/// followed by rows `[y_start, y_end)` of `src`. Returns null if allocating or
+/// cloning fails.
+fn cloneExact(
+    self: *PageList,
+    prefix: ?*const Page,
+    src: *const Page,
+    y_start: usize,
+    y_end: usize,
+) ?*List.Node {
+    var cap = src.exactRowCapacity(y_start, y_end);
+    const prefix_rows: size.CellCountInt = if (prefix) |p| p.size.rows else 0;
+    if (prefix) |p| {
+        // Each exact capacity covers its own rows, so their sum covers both.
+        // A saturated sum makes cloning fail, which callers handle.
+        const more = p.exactRowCapacity(0, prefix_rows);
+        cap.rows += more.rows;
+        cap.styles +|= more.styles;
+        cap.grapheme_bytes +|= more.grapheme_bytes;
+        cap.hyperlink_bytes +|= more.hyperlink_bytes;
+        cap.string_bytes +|= more.string_bytes;
+    }
+
+    const node = self.createPage(.{ .cap = cap, .exact_size = true }) catch return null;
+    const page = node.page();
+    page.size.rows = cap.rows;
+    if (prefix) |p| page.cloneFrom(p, 0, prefix_rows) catch {
+        self.destroyNode(node);
+        return null;
+    };
+    const dst_rows = page.rows.ptr(page.memory)[prefix_rows..cap.rows];
+    for (dst_rows, src.rows.ptr(src.memory)[y_start..y_end]) |*dst, *row| {
+        page.cloneRowFrom(src, dst, row) catch {
+            self.destroyNode(node);
+            return null;
+        };
+    }
+    return node;
 }
 
 /// This represents the state necessary to render a scrollbar for this
@@ -4142,16 +4284,17 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
     const page = next_node.page();
     page.size.rows = 1;
 
-    // We should never be more than our max size here because we've
-    // verified the case above.
     page.assertIntegrity();
 
     // Record the increased row count
     self.total_rows += 1;
 
     // Appending a page can cross the line limit and can make the oldest
-    // active-boundary page wholly historical.
+    // active-boundary page wholly historical. Pruning a heap page smaller
+    // than the new one (see `splitBoundary`) can leave the byte limit
+    // crossed too.
     self.limits.enforce(self, .lines);
+    self.limits.enforce(self, .bytes);
     return next_node;
 }
 
@@ -4867,8 +5010,9 @@ const compressPage_tw = tripwire.module(
 ///
 /// Eligible nodes are complete pages before the active boundary which do not
 /// intersect the viewport. The boundary page is excluded because it may
-/// contain both scrollback and active rows; visible pages remain resident for
-/// immediate redraw and scrolling.
+/// contain both scrollback and active rows (`splitBoundary` moves its
+/// scrollback out); visible pages remain resident for immediate redraw and
+/// scrolling.
 ///
 /// Compression requires a system that supports reclaiming physical memory for
 /// virtual allocations while retaining their address ranges.
@@ -20578,6 +20722,206 @@ test "PageList split preserves hyperlinks" {
         const link_id = second_page.lookupHyperlink(rac.cell).?;
         const link = second_page.hyperlink_set.get(second_page.memory, link_id);
         try testing.expectEqualStrings("https://example.com", link.uri.slice(second_page.memory));
+    }
+}
+
+/// Write each row's screen y + 1 into its first cell.
+fn markRowsForTest(self: *PageList) void {
+    var it = self.rowIterator(.right_down, .{ .screen = .{} }, null);
+    var mark: u21 = 1;
+    while (it.next()) |p| : (mark += 1) p.rowAndCell().cell.* = .{
+        .content_tag = .codepoint,
+        .content = .{ .codepoint = .{ .data = mark } },
+    };
+}
+
+fn expectRowsMarkedForTest(self: *PageList) !void {
+    var it = self.rowIterator(.right_down, .{ .screen = .{} }, null);
+    var mark: u21 = 1;
+    while (it.next()) |p| : (mark += 1) {
+        try std.testing.expectEqual(mark, p.rowAndCell().cell.content.codepoint.data);
+    }
+    try std.testing.expectEqual(self.total_rows + 1, mark);
+}
+
+test "PageList splitBoundary moves boundary history into an exact page" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer s.deinit();
+    try s.growColdPagesForTest(1);
+    while (s.pages.last.?.rows() < 100) _ = try s.grow();
+    s.markRowsForTest();
+    const total_rows = s.total_rows;
+    const activity = s.page_compression.activity_serial;
+
+    try testing.expect(s.splitBoundary());
+
+    // The active rows now start a page of their own, and the boundary
+    // history sits in an exact page behind them.
+    const active = s.getTopLeft(.active);
+    try testing.expectEqual(s.pages.last.?, active.node);
+    try testing.expectEqual(0, active.y);
+    try testing.expectEqual(s.rows, active.node.rows());
+    const history = active.node.prev.?;
+    try testing.expectEqual(.heap, history.owned);
+    try testing.expectEqual(100 - s.rows, history.rows());
+    try testing.expectEqual(3, s.totalPages());
+    try testing.expectEqual(total_rows, s.total_rows);
+    try testing.expectEqual(activity, s.page_compression.activity_serial);
+    try s.expectRowsMarkedForTest();
+
+    // Too little history is left to split again, and the history is cold.
+    try testing.expect(!s.splitBoundary());
+    _ = s.compress(.full);
+    try testing.expectEqual(2, s.memoryStats().compressed_pages);
+    try s.expectRowsMarkedForTest();
+}
+
+test "PageList splitBoundary tops up the newest history page" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer s.deinit();
+    const std_rows = initialCapacity(s.cols).rows;
+
+    while (s.pages.last.?.rows() < 100) _ = try s.grow();
+    try testing.expect(s.splitBoundary());
+    _ = s.compress(.full);
+
+    // The next history fits in the partial page before it.
+    for (0..200) |_| _ = try s.grow();
+    s.markRowsForTest();
+    try testing.expect(s.splitBoundary());
+    try testing.expectEqual(2, s.totalPages());
+    try testing.expectEqual(100 - s.rows + 200, s.pages.first.?.rows());
+    try s.expectRowsMarkedForTest();
+
+    // History beyond a standard page starts a new page.
+    for (0..std_rows - 100) |_| _ = try s.grow();
+    s.markRowsForTest();
+    const history_rows = s.total_rows - s.rows;
+    try testing.expect(s.splitBoundary());
+    try testing.expectEqual(3, s.totalPages());
+    try testing.expectEqual(std_rows, s.pages.first.?.rows());
+    try testing.expectEqual(history_rows - std_rows, s.pages.first.?.next.?.rows());
+    try testing.expectEqual(.heap, s.pages.first.?.next.?.owned);
+    try s.expectRowsMarkedForTest();
+}
+
+test "PageList splitBoundary keeps tracked pins on their rows" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer s.deinit();
+    while (s.pages.last.?.rows() < 100) _ = try s.grow();
+    try testing.expect(s.splitBoundary());
+    for (0..initialCapacity(s.cols).rows - 50) |_| _ = try s.grow();
+    _ = s.compress(.full);
+
+    // A pin in the compressed page being topped up, in the rows topping it
+    // up, in the rows starting the next history page, and in the active area.
+    const ys = [_]usize{ 10, 100, s.total_rows - s.rows - 10, s.total_rows - 3 };
+    var pins: [ys.len]*Pin = undefined;
+    for (&pins, ys) |*p, y| p.* = try s.trackPin(s.pin(.{ .screen = .{ .x = 7, .y = @intCast(y) } }).?);
+    defer for (pins) |p| s.untrackPin(p);
+
+    try testing.expect(s.splitBoundary());
+    for (pins, ys) |p, y| {
+        try testing.expectEqual(point.Point{ .screen = .{ .x = 7, .y = @intCast(y) } }, s.pointFromPin(.screen, p.*).?);
+        try testing.expect(!p.garbage);
+    }
+}
+
+test "PageList splitBoundary skips boundaries it can't release" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer s.deinit();
+
+    // Less than a screenful of history.
+    while (s.pages.last.?.rows() < 2 * s.rows - 1) _ = try s.grow();
+    try testing.expect(!s.splitBoundary());
+
+    // Visible history.
+    _ = try s.grow();
+    s.scroll(.{ .delta_row = -1 });
+    try testing.expect(!s.splitBoundary());
+    s.scroll(.{ .active = {} });
+
+    // A compressed boundary page.
+    try testing.expect(s.compressPage(s.pages.last.?));
+    try testing.expect(!s.splitBoundary());
+    _ = s.pages.last.?.page();
+
+    // An active area spanning two pages.
+    try s.fillLastPageForTest();
+    for (0..s.rows / 2) |_| _ = try s.grow();
+    try testing.expect(s.getTopLeft(.active).node != s.pages.last.?);
+    try testing.expect(!s.splitBoundary());
+
+    try testing.expectEqual(2, s.totalPages());
+}
+
+test "PageList splitBoundary history survives resize" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer s.deinit();
+    while (s.pages.last.?.rows() < 100) _ = try s.grow();
+    try testing.expect(s.splitBoundary());
+    for (0..300) |_| _ = try s.grow();
+    try testing.expect(s.splitBoundary());
+    s.markRowsForTest();
+    _ = s.compress(.full);
+
+    try s.resize(.{ .cols = 100, .reflow = true });
+    try s.expectRowsMarkedForTest();
+    try s.resize(.{ .rows = 40, .reflow = true });
+    try s.expectRowsMarkedForTest();
+    try s.resize(.{ .cols = 80, .rows = 24, .reflow = true });
+    try s.expectRowsMarkedForTest();
+}
+
+test "PageList splitBoundary keeps the byte limit" {
+    const testing = std.testing;
+
+    // Two lists fed the same rows, one splitting its boundary as if idle
+    // every so often. Exact history pages must not push the split list past
+    // its byte limit, and pruning, being page granular, keeps it within a
+    // page of the other list's history.
+    const max_size = 6 * PagePool.item_size;
+    var plain = try init(testing.allocator, .{ .cols = 80, .rows = 24, .max_size = max_size });
+    defer plain.deinit();
+    var split_list = try init(testing.allocator, .{ .cols = 80, .rows = 24, .max_size = max_size });
+    defer split_list.deinit();
+
+    for (0..20 * initialCapacity(80).rows) |i| {
+        _ = try plain.grow();
+        _ = try split_list.grow();
+        if (i % 97 == 0) {
+            _ = split_list.splitBoundary();
+            _ = split_list.compress(.full);
+        }
+        try testing.expect(split_list.page_size <= split_list.limits.max(.bytes));
+        try testing.expect(split_list.total_rows + initialCapacity(80).rows >= plain.total_rows);
+    }
+}
+
+test "PageList grow keeps the byte limit after pruning a small heap page" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24, .max_size = 3 * PagePool.item_size });
+    defer s.deinit();
+
+    // An exact first page leaves room under the limit for another
+    // standard page that pruning it alone doesn't make up for.
+    while (s.pages.last.?.rows() < 50) _ = try s.grow();
+    try testing.expect(s.splitBoundary());
+    try testing.expectEqual(.heap, s.pages.first.?.owned);
+    while (s.pages.first.?.owned == .heap) {
+        _ = try s.grow();
+        try testing.expect(s.page_size <= s.limits.max(.bytes));
     }
 }
 

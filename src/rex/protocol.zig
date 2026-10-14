@@ -15,7 +15,12 @@
 //! answers with a `stream` id and the block's full id, and every data
 //! frame starts with that stream id. `block.unsubscribe` ends a stream.
 //! Each block counts the bytes its program has written as `seq`; a client
-//! that has applied everything through `seq` is in sync at that point.
+//! that has applied everything through `seq` is in sync at that point: it
+//! holds the server's screen and scrollback, except that once the byte
+//! limit prunes scrollback the two may drop their oldest page at different
+//! times. The server's idle compression moves scrollback out of the page
+//! holding the active area (`PageList.splitBoundary`), which clients don't
+//! see.
 //! After subscribing the client gets either a snapshot (`snap` chunks at
 //! `base_seq`) or, when it passed a `since_seq` the server can still
 //! replay, `out` frames from there. Then live `out` and `grid` frames
