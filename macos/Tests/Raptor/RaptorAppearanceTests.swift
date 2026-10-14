@@ -16,36 +16,45 @@ struct RaptorAppearanceTests {
         #expect(a.style == .blended)
         #expect(a.density == .islands)
         #expect(a.paneHeaders)
+        #expect(a.translucentPanes)
     }
 
     @Test func savedAndForcedValues() {
         let defaults = fresh()
         defaults.set("compact", forKey: "RaptorPaneDensity")
         defaults.set(false, forKey: "RaptorPaneHeaders")
+        defaults.set(false, forKey: "RaptorTranslucentPanes")
         let saved = RaptorAppearance(defaults: defaults, environment: [:])
         #expect(saved.density == .compact)
         #expect(!saved.paneHeaders)
+        #expect(!saved.translucentPanes)
 
         let forced = RaptorAppearance(defaults: defaults, environment: [
             "RAPTOR_INTERFACE_STYLE": "solid",
             "RAPTOR_PANE_DENSITY": "islands",
             "RAPTOR_PANE_HEADERS": "1",
+            "RAPTOR_TRANSLUCENT_PANES": "1",
         ])
         #expect(forced.style == .solid)
         #expect(forced.density == .islands)
         #expect(forced.paneHeaders)
+        #expect(forced.translucentPanes)
     }
 
     /// Every style keeps unfocused panes undimmed; only the translucent ones let the
-    /// desktop through the panes.
+    /// desktop through the panes, as much as through the chrome, unless turned off.
     @Test func config() {
         let a = RaptorAppearance(defaults: fresh(), environment: [:])
         a.style = .solid
         #expect(a.config.contains("unfocused-split-opacity = 1"))
-        #expect(a.config.contains("background-opacity = 1\n"))
+        #expect(a.config.contains("background-opacity = 1.0\n"))
         a.style = .blended
-        #expect(a.config.contains("background-opacity = \(RaptorAppearance.paneOpacity)"))
+        #expect(RaptorAppearance.paneOpacity == RaptorWindowBackground.tint)
+        #expect(a.config.contains("background-opacity = \(RaptorAppearance.paneOpacity)\n"))
         #expect(!a.config.contains("background-blur"))
+        a.translucentPanes = false
+        #expect(a.config.contains("background-opacity = 1.0\n"))
+        a.translucentPanes = true
         a.style = .glass
         if RaptorAppearance.glassAvailable {
             #expect(a.config.contains("background-blur = macos-glass-regular"))

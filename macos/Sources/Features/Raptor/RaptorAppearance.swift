@@ -69,6 +69,13 @@ final class RaptorAppearance: ObservableObject {
     }
     @Published var density: Density { didSet { save(density.rawValue, Keys.density) } }
     @Published var paneHeaders: Bool { didSet { save(paneHeaders, Keys.paneHeaders) } }
+    /// Blended and Glass show the desktop through the panes as through the chrome.
+    @Published var translucentPanes: Bool {
+        didSet {
+            save(translucentPanes, Keys.translucentPanes)
+            applyConfig()
+        }
+    }
     /// Ghostty's font-thicken.
     @Published var fontSmoothing: Bool {
         didSet {
@@ -87,6 +94,7 @@ final class RaptorAppearance: ObservableObject {
         static let style = "RaptorInterfaceStyle"
         static let density = "RaptorPaneDensity"
         static let paneHeaders = "RaptorPaneHeaders"
+        static let translucentPanes = "RaptorTranslucentPanes"
         static let fontSmoothing = "RaptorFontSmoothing"
         static let paddingColor = "RaptorPaddingColor"
     }
@@ -101,6 +109,7 @@ final class RaptorAppearance: ObservableObject {
         style = value(Keys.style, "RAPTOR_INTERFACE_STYLE").flatMap(Style.init) ?? .blended
         density = value(Keys.density, "RAPTOR_PANE_DENSITY").flatMap(Density.init) ?? .islands
         paneHeaders = value(Keys.paneHeaders, "RAPTOR_PANE_HEADERS").map { $0 == "1" || $0 == "true" } ?? true
+        translucentPanes = value(Keys.translucentPanes, "RAPTOR_TRANSLUCENT_PANES").map { $0 == "1" || $0 == "true" } ?? true
         fontSmoothing = defaults.bool(forKey: Keys.fontSmoothing)
         paddingColor = defaults.string(forKey: Keys.paddingColor).flatMap(PaddingColor.init) ?? .background
     }
@@ -126,11 +135,17 @@ final class RaptorAppearance: ObservableObject {
 
     // MARK: Ghostty config
 
-    /// Opacity of the terminal background in panes, so the tinted desktop shows faintly
-    /// through them in the translucent styles.
-    static let paneOpacity = 0.7
+    /// Opacity of the theme background in translucent panes: the chrome's tint, so the
+    /// desktop shows through the panes just as it does through the chrome around them.
+    static let paneOpacity = RaptorWindowBackground.tint
 
-    /// Ghostty config that Raptor sets before the user's own, which can override it.
+    /// The panes' background-opacity: translucent in Blended and Glass unless turned off.
+    var backgroundOpacity: Double {
+        effectiveStyle != .solid && translucentPanes ? Self.paneOpacity : 1
+    }
+
+    /// Ghostty config that Raptor sets before the user's own, which can override it:
+    /// an explicit background-opacity in the user's config wins in every style.
     var config: String {
         var lines = [
             // Rex doesn't dim unfocused panes; their headers darken instead.
@@ -143,13 +158,8 @@ final class RaptorAppearance: ObservableObject {
             "keybind = super+shift+arrow_down=new_split:down",
             "keybind = super+shift+arrow_right=new_split:right",
         ]
-        switch effectiveStyle {
-        case .solid:
-            lines.append("background-opacity = 1")
-        case .blended:
-            lines.append("background-opacity = \(Self.paneOpacity)")
-        case .glass:
-            lines.append("background-opacity = \(Self.paneOpacity)")
+        lines.append("background-opacity = \(backgroundOpacity)")
+        if effectiveStyle == .glass {
             lines.append("background-blur = macos-glass-regular")
         }
         return lines.joined(separator: "\n") + "\n"

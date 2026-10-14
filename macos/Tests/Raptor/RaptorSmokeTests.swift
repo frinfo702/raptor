@@ -220,15 +220,16 @@ final class RaptorSmokeTests: XCTestCase {
                 for h in [true, false] {
                     (appearance.style, appearance.density, appearance.paneHeaders) = (s, d, h)
                     let glass = appearance.effectiveStyle == .glass
-                    /// Glass is tinted like Blended, not at the panes' background-opacity.
+                    /// The glass is untinted: the window background tints the chrome
+                    /// around the panes, not the glass under them.
                     var glassTint: Double? { controller.terminalViewContainer?.derivedConfig?.backgroundOpacity }
                     settle {
                         controller.window?.isOpaque == (appearance.effectiveStyle == .solid) &&
-                            (glassTint == (glass ? RaptorWindowBackground.tint : nil))
+                            (glassTint == (glass ? 0 : nil))
                     }
                     let what = "\(s) \(d) headers \(h)"
                     XCTAssertEqual(controller.window?.isOpaque, appearance.effectiveStyle == .solid, what)
-                    XCTAssertEqual(glassTint, glass ? RaptorWindowBackground.tint : nil, what)
+                    XCTAssertEqual(glassTint, glass ? 0 : nil, what)
                     XCTAssertEqual(Array(controller.surfaceTree), panes, "\(what) replaced a pane")
                     XCTAssertTrue(panes.allSatisfy { $0.window === controller.window }, "\(what) took a pane off screen")
                     XCTAssertTrue(panes.allSatisfy { controller.block(of: $0) != nil }, "\(what) unbound a pane")

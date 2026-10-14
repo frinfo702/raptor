@@ -45,7 +45,15 @@ struct RaptorWindowView: View {
                 .padding(.top, islands ? Self.islandInset - 2 : 0)
                 .padding([.leading, .trailing, .bottom], islands ? Self.islandInset : 0)
         }
-        .background(RaptorWindowBackground(style: appearance.effectiveStyle, tokens: tokens))
+        .backgroundPreferenceValue(RaptorPaneFrames.self) { panes in
+            GeometryReader { proxy in
+                RaptorWindowBackground(
+                    style: appearance.effectiveStyle,
+                    tokens: tokens,
+                    panes: panes.map { proxy[$0] },
+                    paneRadius: islands ? RaptorPane.islandRadius : 0)
+            }
+        }
         .overlay(alignment: .top) {
             if controller.commandPaletteIsShowing {
                 RaptorCommandPalette(
@@ -107,10 +115,16 @@ struct RaptorWindowView: View {
 }
 
 /// The window's background: the chrome colour, or the desktop blurred behind the
-/// window and tinted with it. Glass is drawn by the window's container.
+/// window (Blended) or seen through the container's glass (Glass) and tinted with it.
+/// The tint stops at the panes, which draw the theme background at the same opacity
+/// over the same blur or glass, so their bodies let the desktop through just as the
+/// chrome does.
 struct RaptorWindowBackground: View {
     let style: RaptorAppearance.Style
     let tokens: ThemeTokens
+    /// The panes' cards, in this view's coordinates.
+    var panes: [CGRect] = []
+    var paneRadius: CGFloat = 0
 
     /// How much of the chrome colour covers the blurred desktop.
     static let tint = 0.3
@@ -122,10 +136,23 @@ struct RaptorWindowBackground: View {
         case .blended:
             ZStack {
                 BehindWindowBlur()
-                Color(nsColor: tokens.chrome).opacity(Self.tint)
+                chromeTint
             }
         case .glass:
-            Color.clear
+            chromeTint
+        }
+    }
+
+    /// The chrome colour everywhere but the panes.
+    private var chromeTint: some View {
+        GeometryReader { proxy in
+            Path { path in
+                path.addRect(CGRect(origin: .zero, size: proxy.size))
+                for pane in panes {
+                    path.addRoundedRect(in: pane, cornerSize: CGSize(width: paneRadius, height: paneRadius))
+                }
+            }
+            .fill(Color(nsColor: tokens.chrome).opacity(Self.tint), style: FillStyle(eoFill: true))
         }
     }
 

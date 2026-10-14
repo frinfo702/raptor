@@ -71,21 +71,30 @@ with headers, the command palette and the session switcher against Rex's
 reference frames (title bar height, tab track, pill and divider sizes, island
 inset, gutter and radius, header colours, theme token colours, palette width,
 position, rows and accent row) and writes side-by-side images to its output
-directory. It needs Screen Recording permission for the terminal running it,
-but not Accessibility: it sizes the window through the app's frame autosave.
+directory. It also puts a flat black and then a flat white window behind
+Raptor to check that Blended and Glass pane bodies let through as much as the
+chrome does, and the islands' sheen. It needs Screen Recording permission for
+the terminal running it, but not Accessibility: it sizes the window through the
+app's frame autosave.
 Run it on a release build (`zig build -Doptimize=ReleaseFast`): debug builds
 show a banner above the panes that moves them down.
 
 ## Appearance
 
 Settings (⌘,) → Appearance has Interface style (Solid, Blended, and Glass on
-macOS 26 and later), Pane density (Comfortable islands or Compact) and Pane
-headers. A fresh install is Blended islands with headers. With two panes open,
-switch each setting: the window restyles at once and the panes keep running
-(the XCTest `testAppearanceAppliesLive` checks this). Over a colourful desktop,
-Blended shows it blurred and tinted through the chrome and, faintly, the panes.
-Glass shows it through liquid glass in the chrome just as clearly, even with
-`background-opacity = 0.95` in your own config (that sets the panes only).
+macOS 26 and later), Pane density (Comfortable islands or Compact), Pane
+headers and Translucent panes. A fresh install is Blended islands with headers
+and translucent panes. With two panes open, switch each setting: the window
+restyles at once and the panes keep running (the XCTest
+`testAppearanceAppliesLive` checks this). Over a colourful desktop, Blended
+shows it blurred and tinted by the theme through the chrome and the pane bodies
+alike, with text, cursor and selection fully opaque; islands have a faint light
+rim (dark themes) or dark rim (light themes). Glass shows it through liquid
+glass the same way. Turning Translucent panes off makes the pane bodies opaque
+again. A `background-opacity` in your own config sets the panes in every style
+and wins over Translucent panes (`0.95` leaves them all but opaque); the chrome
+stays translucent either way. In Compact, unfocused panes' headers are denser
+chrome than the focused pane's header and body.
 
 ## Focus
 
