@@ -47,7 +47,8 @@ jobs:
 
       # The app's updater reads appcast.xml from the fixed raptor-appcast
       # prerelease, which never becomes Latest. Without the signing key the
-      # DMG still ships and the existing feed is left untouched.
+      # DMG still ships and the existing feed is left untouched. Only the
+      # newest raptor-v* tag may move the feed, so it never goes backwards.
       - name: Upload Sparkle appcast
         env:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
@@ -56,6 +57,16 @@ jobs:
           set -euo pipefail
           if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
             echo "::warning::SPARKLE_PRIVATE_KEY is not set; skipping appcast.xml, so installed apps will not see $TAG as an update"
+            exit 0
+          fi
+          git fetch --force --tags --quiet origin
+          newest="$(git tag -l 'raptor-v*' --sort=-v:refname | head -1)"
+          if [ "$TAG" != "$newest" ]; then
+            echo "::notice::$TAG is not the newest Raptor release ($newest); leaving appcast.xml untouched"
+            exit 0
+          fi
+          if [ ! -f dist/macos/raptor-appcast.sh ]; then
+            echo "::notice::$TAG predates the Raptor updater; leaving appcast.xml untouched"
             exit 0
           fi
           mkdir -p .action/sparkle
