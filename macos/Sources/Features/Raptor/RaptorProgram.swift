@@ -1,9 +1,10 @@
 import SwiftUI
 
 /// How Raptor shows a pane's foreground program: a friendly name and an icon, drawn
-/// plain in pane headers and on a tinted tile in tabs.
+/// plain in pane headers and, in tabs, as the program's card or else on a tinted tile.
 ///
-/// ponytail: SF Symbols and text glyphs stand in for program logos until the final icon art.
+/// ponytail: SF Symbols and text glyphs stand in for program logos in pane headers and
+/// on tiles for programs without a card.
 struct RaptorProgram: Equatable {
     enum Icon: Equatable {
         case symbol(String)
@@ -17,6 +18,8 @@ struct RaptorProgram: Equatable {
     let glyph: Color
     /// Agents title their panes with the task they're on.
     var isAgent = false
+    /// The tab card drawn instead of the tile, from `cards`.
+    var card: String?
 
     static let shells: Set<String> = [
         "sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "xonsh",
@@ -26,7 +29,23 @@ struct RaptorProgram: Equatable {
         Color(red: Double((hex >> 16) & 0xFF) / 255, green: Double((hex >> 8) & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
     }
 
-    static let shell = RaptorProgram(name: "shell", icon: .text(">_"), tile: rgb(0x3B5C3E), glyph: rgb(0x8CD97F))
+    static let shell = RaptorProgram(name: "shell", icon: .text(">_"), tile: rgb(0x3B5C3E), glyph: rgb(0x8CD97F), card: "shell")
+
+    /// Tab cards by process name, shells aside: imagesets in RaptorCards.xcassets. A card
+    /// drawn for light and dark themes is two imagesets, "<card>-light" and "<card>-dark".
+    static let cards: [String: String] = [
+        "claude": "claudecode",
+        "codex": "codex",
+        "gh": "github",
+        "git": "git",
+        "opencode": "opencode",
+    ]
+
+    /// The imageset that draws a card on a light or dark theme; a card with one image
+    /// serves both. Nil if the card has no art.
+    static func cardAsset(_ card: String, light: Bool) -> String? {
+        ["\(card)-\(light ? "light" : "dark")", card].first { NSImage(named: $0) != nil }
+    }
 
     /// Programs by process name.
     private static let known: [String: RaptorProgram] = [
@@ -56,9 +75,11 @@ struct RaptorProgram: Equatable {
     static func identify(_ process: String?) -> RaptorProgram? {
         guard let process, !process.isEmpty else { return nil }
         if shells.contains(process) {
-            return .init(name: process, icon: shell.icon, tile: shell.tile, glyph: shell.glyph)
+            return .init(name: process, icon: shell.icon, tile: shell.tile, glyph: shell.glyph, card: shell.card)
         }
-        return known[process] ?? .init(name: process, icon: .symbol("terminal"), tile: rgb(0x3A3A3A), glyph: rgb(0xDDDDDD))
+        var program = known[process] ?? .init(name: process, icon: .symbol("terminal"), tile: rgb(0x3A3A3A), glyph: rgb(0xDDDDDD))
+        program.card = cards[process]
+        return program
     }
 
     /// A pane's title: an agent's own title, else "Name ~/path", else the terminal title.
@@ -88,23 +109,44 @@ struct RaptorProgramIcon: View {
     }
 }
 
-/// A tab's icon: the focused pane's program on its tile, with a coloured sliver behind
-/// it for each other pane, up to two.
+/// A tab's icon: the focused pane's program on its card or tile, with a coloured sliver
+/// behind it for each other pane, up to two.
 struct RaptorTileCluster: View {
     let program: RaptorProgram
     let others: [RaptorProgram]
+    /// Picks a card's light-theme art.
+    let light: Bool
+
+    /// The front tile's lean, measured from the captain's close-up of Rex's tab.
+    static let tilt = -5.0
 
     var body: some View {
         HStack(spacing: 0) {
-            RaptorProgramIcon(icon: program.icon, size: 12)
-                .foregroundStyle(program.glyph)
-                .frame(width: 18, height: 18)
-                .background(RoundedRectangle(cornerRadius: 5).fill(program.tile))
-                .zIndex(1)
+            Group {
+                if let card = program.card, let asset = RaptorProgram.cardAsset(card, light: light),
+                   let image = NSImage(named: asset) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(height: 18)
+                } else {
+                    RaptorProgramIcon(icon: program.icon, size: 12)
+                        .foregroundStyle(program.glyph)
+                        .frame(width: 18, height: 18)
+                        .background(RoundedRectangle(cornerRadius: 5).fill(program.tile))
+                }
+            }
+            // Rex leans the front tile a few degrees, lifted by a soft shadow.
+            .rotationEffect(.degrees(Self.tilt))
+            .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
+            .zIndex(1)
+            // Each pane behind it peeks out 6 pt, shorter and darker the further back.
             ForEach(Array(others.prefix(2).enumerated()), id: \.offset) { i, other in
-                RoundedRectangle(cornerRadius: 3)
+                RoundedRectangle(cornerRadius: 4)
                     .fill(other.glyph)
-                    .frame(width: 8, height: 18 - CGFloat(i + 1) * 3)
+                    .brightness(-0.15 * Double(i))
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.black.opacity(0.35), lineWidth: 0.5))
+                    .frame(width: 10, height: i == 0 ? 16 : 13.5)
                     .padding(.leading, -4)
                     .zIndex(-Double(i))
             }

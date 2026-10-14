@@ -91,24 +91,7 @@ struct RaptorWindowView: View {
             .buttonStyle(.plain)
             .help("Change Session ⌘K")
             .padding(.trailing, 20)
-            ForEach(Array(controller.tabs.enumerated()), id: \.element.id) { i, tab in
-                let active = tab.id == controller.activeTab
-                // Light themes separate inactive tabs, Safari-style.
-                if i > 0 && tokens.isLight {
-                    let prevActive = controller.tabs[i - 1].id == controller.activeTab
-                    Rectangle()
-                        .fill(Color(nsColor: tokens.separator))
-                        .frame(width: 1, height: 16)
-                        .opacity(active || prevActive ? 0 : 1)
-                }
-                RaptorTabView(
-                    tab: tab,
-                    active: active,
-                    tokens: tokens,
-                    solid: appearance.effectiveStyle == .solid,
-                    select: { controller.selectTab(tab.id) },
-                    close: { controller.closeTab(tab.id) })
-            }
+            RaptorTabStrip(controller: controller, tokens: tokens)
             Spacer(minLength: 8)
             RaptorTitlebarButton(symbol: "command", help: "Command Palette") {
                 controller.toggleCommandPalette(nil)
@@ -200,77 +183,8 @@ struct RaptorSessionItem: View {
                     .lineLimit(1)
             }
         }
+        // The tabs shrink before the session's name does.
+        .fixedSize()
         .accessibilityElement(children: .combine)
-    }
-}
-
-struct RaptorTabView: View {
-    let tab: RaptorController.Tab
-    let active: Bool
-    let tokens: ThemeTokens
-    /// Solid chrome lifts the active tab with an opaque token; the translucent
-    /// styles raise a sheet of white over whatever is behind.
-    let solid: Bool
-    let select: () -> Void
-    let close: () -> Void
-
-    @State private var hovering = false
-
-    var body: some View {
-        HStack(spacing: 8) {
-            RaptorTileCluster(program: tab.program, others: tab.others)
-            // Long titles fade out instead of ending in an ellipsis.
-            Text(tab.title)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(active ? .primary : .secondary)
-                .lineLimit(1)
-                .fixedSize()
-                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                .clipped()
-                .mask(HStack(spacing: 0) {
-                    Rectangle()
-                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
-                        .frame(width: 24)
-                })
-            if hovering {
-                Button(action: close) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Close Tab")
-            }
-        }
-        .padding(.leading, 5)
-        .padding(.trailing, 10)
-        .frame(minWidth: 80, maxWidth: 220, minHeight: 27, maxHeight: 27)
-        .background(pill)
-        .contentShape(Capsule())
-        .onHover { hovering = $0 }
-        .onTapGesture(perform: select)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(tab.title)
-        .accessibilityAddTraits(active ? [.isButton, .isSelected] : .isButton)
-        .accessibilityAction(.default, select)
-        .accessibilityAction(named: "Close Tab", close)
-    }
-
-    /// The active tab is a raised capsule. Light themes draw it as chrome with a border.
-    @ViewBuilder private var pill: some View {
-        if active {
-            if tokens.isLight {
-                Capsule()
-                    .fill(Color(nsColor: tokens.chrome))
-                    .overlay(Capsule().strokeBorder(Color(nsColor: tokens.separator)))
-            } else if solid {
-                Capsule().fill(Color(nsColor: tokens.tabActive))
-            } else {
-                Capsule()
-                    .fill(Color.white.opacity(0.08))
-                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.1), lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
-            }
-        }
     }
 }

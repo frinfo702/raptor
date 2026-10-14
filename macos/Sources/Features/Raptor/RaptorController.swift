@@ -294,7 +294,7 @@ class RaptorController: BaseTerminalController {
             let others = w.blocks.filter { $0.id != w.focused_block }.map { (blocks[$0.id] ?? Block()).program }
             return Tab(
                 id: w.id,
-                title: w.label.flatMap { $0.isEmpty ? nil : $0 } ?? focused.headerTitle,
+                title: RaptorTabView.isDefaultLabel(w.label, window: w.id) ? focused.headerTitle : w.label ?? "",
                 program: focused.program,
                 others: others)
         }
