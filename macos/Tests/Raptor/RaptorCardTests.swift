@@ -30,20 +30,34 @@ struct RaptorCardTests {
 
     @Test func everyCardHasArtForBothThemes() {
         for card in Set(RaptorProgram.cards.values).union(["shell"]) {
-            #expect(RaptorProgram.cardImage(card, light: true) != nil, "\(card)")
-            #expect(RaptorProgram.cardImage(card, light: false) != nil, "\(card)")
+            #expect(RaptorProgram.cardAsset(card, light: true) != nil, "\(card)")
+            #expect(RaptorProgram.cardAsset(card, light: false) != nil, "\(card)")
         }
     }
 
     @Test func variantFollowsTheTheme() {
-        #expect(RaptorProgram.cardImage("codex", light: true) === NSImage(named: "codex-light"))
-        #expect(RaptorProgram.cardImage("codex", light: false) === NSImage(named: "codex-dark"))
-        #expect(RaptorProgram.cardImage("shell", light: true) === NSImage(named: "shell-light"))
-        #expect(RaptorProgram.cardImage("shell", light: false) === NSImage(named: "shell-dark"))
+        #expect(RaptorProgram.cardAsset("codex", light: true) == "codex-light")
+        #expect(RaptorProgram.cardAsset("codex", light: false) == "codex-dark")
+        #expect(RaptorProgram.cardAsset("shell", light: true) == "shell-light")
+        #expect(RaptorProgram.cardAsset("shell", light: false) == "shell-dark")
     }
 
     @Test func singleArtServesBothThemes() {
-        #expect(RaptorProgram.cardImage("claudecode", light: true) === NSImage(named: "claudecode"))
-        #expect(RaptorProgram.cardImage("claudecode", light: false) === NSImage(named: "claudecode"))
+        #expect(RaptorProgram.cardAsset("claudecode", light: true) == "claudecode")
+        #expect(RaptorProgram.cardAsset("claudecode", light: false) == "claudecode")
+    }
+}
+
+/// Tab titles draw the program's name, then its directory dimmer.
+struct RaptorTabTitleTests {
+    @Test func nameThenPath() {
+        #expect(RaptorTabView.titleParts("Bun ~/sites/announcement", program: "Bun") == ("Bun", " ~/sites/announcement"))
+        #expect(RaptorTabView.titleParts("fish ~/sites/macos-client", program: "fish") == ("fish", " ~/sites/macos-client"))
+        #expect(RaptorTabView.titleParts("zsh", program: "zsh") == ("zsh", ""))
+    }
+
+    /// An agent's own title is all name.
+    @Test func agentTitle() {
+        #expect(RaptorTabView.titleParts("Stress-test Snake demo", program: "Codex") == ("Stress-test Snake demo", ""))
     }
 }

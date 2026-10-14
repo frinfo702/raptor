@@ -4,8 +4,11 @@
 # Opens a session window at 1080x720 pt on a private server with a reference
 # theme, screenshots it at 2x, and checks geometry and token colours:
 #   dark  (bg #161616, vs v4_4fps_001.jpg; Solid, compact, no headers):
-#         title bar 40 pt, chrome #131313, active pill 220x27 pt, split
-#         divider #242424;
+#         title bar 40 pt, chrome #131313, split divider #242424; the tab
+#         strip as in the captain's Rex frame (captain-tab-reference.png):
+#         one 32 pt track, 7% white over the chrome (#242424), holding
+#         208 pt tabs; the active one a 208x29 pt capsule 5% whiter (#2E2E2E);
+#         a 1x17 pt divider, 20% white (#4F4F4F), between inactive tabs;
 #   light (bg #F8F6FB, vs acc_on_crop_tabstrip_light.png; same): chrome
 #         #FDFBFF, separators #CECCD1 between inactive tabs;
 #   islands (bg #131313, vs v1_4fps_001.jpg; Solid, islands, headers): cards
@@ -154,6 +157,22 @@ shoot() {
     rm -f "$sock.lock"
 }
 
+# The columns of row $2 whose colour is within 2/255 of $3, as runs "first last".
+runs() {
+    row "$1" "$2" | awk -v want="$3" '
+        function h(s) { return (index("0123456789ABCDEF", substr(s, 1, 1)) - 1) * 16 + index("0123456789ABCDEF", substr(s, 2, 1)) - 1 }
+        function d(a, b) { return a > b ? a - b : b - a }
+        { ok = 1; for (i = 1; i <= 5; i += 2) if (d(h(substr($2, i, 2)), h(substr(want, i, 2))) > 2) ok = 0
+          if (ok) { if (last == "" || $1 != last + 1) { if (first != "") print first, last; first = $1 } last = $1 } }
+        END { if (first != "") print first, last }'
+}
+
+# The rows of column $2 whose colour is within 2/255 of $3, as runs.
+colruns() {
+    magick "$1" -rotate 90 -flop "$tmp/rot.png"
+    runs "$tmp/rot.png" "$2" "$3"
+}
+
 # T8's chrome: no headers, no islands, opaque.
 t8="RAPTOR_INTERFACE_STYLE=solid RAPTOR_PANE_DENSITY=compact RAPTOR_PANE_HEADERS=0"
 
@@ -168,21 +187,30 @@ if [ -f "$img" ]; then
         [ "$(px "$img" 2100 "$y")" != "$(px "$img" 2100 8)" ] && break
     done
     within "title bar height (px at 2x)" "$y" 2 80
-    # The active pill: the run of its colour, the second most common after the
-    # chrome, across the bar's middle row.
-    pill=$(magick "$img" -crop 2160x1+0+40 +repage -format %c histogram:info:- | sort -rn | sed -n 2p | grep -o '#[0-9A-F]\{6\}' | tr -d '#')
-    # From its first pixel to the last one before a long run of chrome; the
-    # icon and title inside it aren't chrome.
-    chrome=$(px "$img" 2000 8)
-    read -r x0 w <<EOF
-$(row "$img" 40 | awk -v p="$pill" -v c="$chrome" '
-        x0 == "" && $2 == p { x0 = $1 }
-        x0 != "" { if ($2 == c) { if (++run >= 10) exit } else { run = 0; x1 = $1 } }
-        END { print x0, x1 - x0 + 1 }')
+    # The track: from the first to the last pixel of its colour across the bar's
+    # middle row; the tabs' contents lie inside it.
+    read -r t0 t1 <<EOF
+$(runs "$img" 40 242424 | awk 'NR == 1 { a = $1 } { b = $2 } END { print a, b }')
 EOF
-    within "pill width (px at 2x)" "$w" 2 440
-    h=$(magick "$img" -crop 1x80+$((x0 + 220))+0 +repage -fill white -fuzz 1% -opaque "#$pill" -fill black +opaque white -trim -format '%h' info:)
-    within "pill height (px at 2x)" "$h" 2 54
+    within "track width (px at 2x)" $((t1 - t0 + 1)) 2 1260
+    # The active pill: from its first pixel to the first long run of track after
+    # it; the card and title inside it aren't pill colour.
+    x0=$(runs "$img" 40 2E2E2E | head -n 1 | cut -d' ' -f1)
+    x1=$(runs "$img" 40 242424 | awk -v a="${x0:-0}" '$1 > a && $2 - $1 >= 10 { print $1 - 1; exit }')
+    w=$((${x1:-0} - ${x0:-0} + 1))
+    # The track's height just past the pill, before the next tab's card.
+    th=$(colruns "$img" $((x1 + 6)) 242424 | awk '{ print $2 - $1 + 1 }' | sort -rn | head -n 1)
+    within "track height (px at 2x)" "${th:-0}" 2 64
+    within "pill width (px at 2x)" "${w:-0}" 2 416
+    near "pill" "$(px "$img" $((x0 + w - 40)) 40)" 2E2E2E
+    ph=$(colruns "$img" $((x0 + w - 40)) 2E2E2E | awk '{ print $2 - $1 + 1 }' | sort -rn | head -n 1)
+    within "pill height (px at 2x)" "${ph:-0}" 4 56
+    # Only the gap between the two inactive tabs shows its divider, one tab past
+    # the pill; titles' antialiasing elsewhere can share its colour.
+    dv=$(runs "$img" 42 4F4F4F | awk -v at="$((x1 + 418))" '$1 >= at - 6 && $1 <= at + 6' | head -n 1)
+    within "divider width (px at 2x)" "$(echo "$dv" | awk '{ print $2 - $1 + 1 }')" 0 2
+    dh=$(colruns "$img" "$(echo "$dv" | cut -d' ' -f1)" 4F4F4F | awk '{ print $2 - $1 + 1 }' | sort -rn | head -n 1)
+    within "divider height (px at 2x)" "${dh:-0}" 2 34
     # The vertical divider between the left and right panes.
     d=none
     for x in $(seq 1070 1090); do
@@ -217,22 +245,6 @@ if [ -f "$img" ]; then
     # A 1 pt line is 2 px wide at 2x.
     within "separator columns" "$cols" 1 2
 fi
-
-# The columns of row $2 whose colour is within 2/255 of $3, as runs "first last".
-runs() {
-    row "$1" "$2" | awk -v want="$3" '
-        function h(s) { return (index("0123456789ABCDEF", substr(s, 1, 1)) - 1) * 16 + index("0123456789ABCDEF", substr(s, 2, 1)) - 1 }
-        function d(a, b) { return a > b ? a - b : b - a }
-        { ok = 1; for (i = 1; i <= 5; i += 2) if (d(h(substr($2, i, 2)), h(substr(want, i, 2))) > 2) ok = 0
-          if (ok) { if (last == "" || $1 != last + 1) { if (first != "") print first, last; first = $1 } last = $1 } }
-        END { if (first != "") print first, last }'
-}
-
-# The rows of column $2 whose colour is within 2/255 of $3, as runs.
-colruns() {
-    magick "$1" -rotate 90 -flop "$tmp/rot.png"
-    runs "$tmp/rot.png" "$2" "$3"
-}
 
 # Islands: cards and the chrome around them.
 islands() {
