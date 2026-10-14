@@ -71,6 +71,17 @@ struct RaptorProgram: Equatable {
         "gemini": .init(name: "Gemini", icon: .symbol("sparkle"), tile: rgb(0x2F4F7A), glyph: rgb(0xBFD8F5), isAgent: true),
     ]
 
+    /// The name a process goes by: its command name, unless only the name it was run as
+    /// (argv[0], without a login shell's "-") is one Raptor knows. Claude Code's binary is
+    /// named for its version ("2.1.299") but run as "claude".
+    static func processName(_ name: String?, argv0: String?) -> String? {
+        let known = { (n: String) in shells.contains(n) || Self.known[n] != nil || cards[n] != nil }
+        if let name, known(name) { return name }
+        guard let argv0 else { return name }
+        let runAs = String((argv0 as NSString).lastPathComponent.drop { $0 == "-" })
+        return known(runAs) ? runAs : name
+    }
+
     /// The program for a process name, nil if there is none yet.
     static func identify(_ process: String?) -> RaptorProgram? {
         guard let process, !process.isEmpty else { return nil }
@@ -109,8 +120,31 @@ struct RaptorProgramIcon: View {
     }
 }
 
-/// A tab's icon: the focused pane's program on its card or tile, with a coloured sliver
-/// behind it for each other pane, up to two.
+/// A program's card, or its tile if it has none, `height` tall.
+struct RaptorCardFace: View {
+    let program: RaptorProgram
+    /// Picks a card's light-theme art.
+    let light: Bool
+    let height: CGFloat
+
+    var body: some View {
+        if let card = program.card, let asset = RaptorProgram.cardAsset(card, light: light),
+           let image = NSImage(named: asset) {
+            Image(nsImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(height: height)
+        } else {
+            RaptorProgramIcon(icon: program.icon, size: height * 2 / 3)
+                .foregroundStyle(program.glyph)
+                .frame(width: height, height: height)
+                .background(RoundedRectangle(cornerRadius: height * 5 / 18).fill(program.tile))
+        }
+    }
+}
+
+/// A tab's icon: the focused pane's program on its card or tile, tilted, with the card
+/// of each other pane stacked behind it, up to two, as in Rex.
 struct RaptorTileCluster: View {
     let program: RaptorProgram
     let others: [RaptorProgram]
@@ -119,37 +153,38 @@ struct RaptorTileCluster: View {
 
     /// The front tile's lean, measured from the captain's close-up of Rex's tab.
     static let tilt = -5.0
+    /// Rex shows at most two cards behind the front one, however many panes the tab has.
+    static let maxBehind = 2
+    /// How far each card behind peeks out past the one in front, and how much shorter it is.
+    static let peek: CGFloat = 5
+    static let shrink: CGFloat = 2
+
+    /// The cards a tab draws, front first: the focused pane's, then one per other pane in
+    /// the tab's order, the same program as often as it runs.
+    static func stack(_ program: RaptorProgram, others: [RaptorProgram]) -> [RaptorProgram] {
+        [program] + others.prefix(maxBehind)
+    }
 
     var body: some View {
-        HStack(spacing: 0) {
-            Group {
-                if let card = program.card, let asset = RaptorProgram.cardAsset(card, light: light),
-                   let image = NSImage(named: asset) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(height: 18)
+        let cards = Self.stack(program, others: others)
+        // Cards share a right edge, then each card behind moves right to peek out.
+        ZStack(alignment: .trailing) {
+            // Back to front: each card behind is shorter and darker.
+            ForEach(Array(cards.enumerated().reversed()), id: \.offset) { depth, card in
+                let face = RaptorCardFace(program: card, light: light, height: 18 - Self.shrink * CGFloat(depth))
+                if depth == 0 {
+                    // Rex leans the front tile a few degrees, lifted by a soft shadow.
+                    face
+                        .rotationEffect(.degrees(Self.tilt))
+                        .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
                 } else {
-                    RaptorProgramIcon(icon: program.icon, size: 12)
-                        .foregroundStyle(program.glyph)
-                        .frame(width: 18, height: 18)
-                        .background(RoundedRectangle(cornerRadius: 5).fill(program.tile))
+                    face
+                        .brightness(-0.12 * Double(depth))
+                        .shadow(color: .black.opacity(0.3), radius: 0.5)
+                        .offset(x: Self.peek * CGFloat(depth))
                 }
             }
-            // Rex leans the front tile a few degrees, lifted by a soft shadow.
-            .rotationEffect(.degrees(Self.tilt))
-            .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
-            .zIndex(1)
-            // Each pane behind it peeks out 6 pt, shorter and darker the further back.
-            ForEach(Array(others.prefix(2).enumerated()), id: \.offset) { i, other in
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(other.glyph)
-                    .brightness(-0.15 * Double(i))
-                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.black.opacity(0.35), lineWidth: 0.5))
-                    .frame(width: 10, height: i == 0 ? 16 : 13.5)
-                    .padding(.leading, -4)
-                    .zIndex(-Double(i))
-            }
         }
+        .padding(.trailing, Self.peek * CGFloat(cards.count - 1))
     }
 }

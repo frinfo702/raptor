@@ -48,6 +48,40 @@ struct RaptorCardTests {
     }
 }
 
+/// A tab stacks the other panes' cards behind the focused pane's, as in Rex.
+struct RaptorCardStackTests {
+    private func cards(_ focused: String?, _ others: [String?]) -> [String?] {
+        let program = { (p: String?) in RaptorProgram.identify(p) ?? .shell }
+        return RaptorTileCluster.stack(program(focused), others: others.map(program)).map(\.card)
+    }
+
+    @Test func otherPanesShowTheirOwnCards() {
+        #expect(cards("zsh", ["claude"]) == ["shell", "claudecode"])
+        #expect(cards("claude", ["zsh"]) == ["claudecode", "shell"])
+    }
+
+    @Test func identicalProgramsShowOneCardEach() {
+        #expect(cards("zsh", ["zsh"]) == ["shell", "shell"])
+        #expect(cards("zsh", ["zsh", "zsh"]) == ["shell", "shell", "shell"])
+    }
+
+    @Test func atMostTwoCardsBehind() {
+        #expect(cards("zsh", ["claude", "codex", "git", "zsh"]) == ["shell", "claudecode", "codex"])
+        #expect(cards("vim", []) == [nil])
+    }
+
+    /// Claude Code's binary is named for its version; it runs as "claude".
+    @Test func versionedBinariesGoByTheNameTheyRunAs() {
+        #expect(RaptorProgram.processName("2.1.299", argv0: "claude") == "claude")
+        #expect(RaptorProgram.processName("2.1.299", argv0: "/Users/me/.local/bin/claude") == "claude")
+        #expect(RaptorProgram.processName("zsh", argv0: "-zsh") == "zsh")
+        #expect(RaptorProgram.processName("make", argv0: "make") == "make")
+        #expect(RaptorProgram.processName("node", argv0: "claude") == "node")
+        #expect(RaptorProgram.processName("2.1.299", argv0: nil) == "2.1.299")
+        #expect(RaptorProgram.processName(nil, argv0: nil) == nil)
+    }
+}
+
 /// Tab titles draw the program's name, then its directory dimmer.
 struct RaptorTabTitleTests {
     @Test func nameThenPath() {

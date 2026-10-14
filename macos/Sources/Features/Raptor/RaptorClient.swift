@@ -126,7 +126,10 @@ final class RaptorClient {
         let pwd: String?
         let foreground: Foreground?
 
-        struct Foreground: Decodable { let name: String? }
+        struct Foreground: Decodable {
+            let name: String?
+            let argv0: String?
+        }
     }
 
     private func handle(_ data: Data) {
@@ -148,7 +151,8 @@ final class RaptorClient {
             case "pwd_changed":
                 if let block = event.block { controller.pwdChanged(block: block, to: event.pwd ?? "") }
             case "process_changed":
-                if let block = event.block { controller.processChanged(block: block, to: event.foreground?.name) }
+                if let block = event.block { controller.processChanged(
+                    block: block, to: RaptorProgram.processName(event.foreground?.name, argv0: event.foreground?.argv0)) }
             case "session_view_changed", "session_label_changed", "window_label_changed":
                 controller.refresh()
             default:

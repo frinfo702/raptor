@@ -420,6 +420,7 @@ class RaptorController: BaseTerminalController {
         struct Foreground: Decodable {
             let pid: Int
             let name: String?
+            let argv0: String?
         }
         let pid: Int
         let foreground: Foreground?
@@ -428,7 +429,7 @@ class RaptorController: BaseTerminalController {
     /// The name of the block's foreground program, asked of the server.
     private func foregroundName(_ block: String) -> String? {
         let p: BlockProcess? = client.call("block.method", ["block": block, "method": "process"])
-        return p?.foreground?.name
+        return RaptorProgram.processName(p?.foreground?.name, argv0: p?.foreground?.argv0)
     }
 
     // ponytail: reads the process name locally, which holds while the server is on this Mac.
