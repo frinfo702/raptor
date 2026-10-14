@@ -19,13 +19,13 @@ struct RaptorCardTests {
         #expect(card("codex") == "codex")
         #expect(card("gh") == "github")
         #expect(card("git") == "git")
-        #expect(card("lazygit") == "git")
         #expect(card("opencode") == "opencode")
     }
 
     @Test func unknownProgramsKeepTheTile() {
         #expect(card("vim") == nil)
         #expect(card("make") == nil)
+        #expect(card("lazygit") == nil)
     }
 
     @Test func everyCardHasArtForBothThemes() {
