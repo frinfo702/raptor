@@ -187,6 +187,7 @@ const Node = struct {
                         error.InvalidOffset,
                         error.OutputTooSmall,
                         error.OutputSizeMismatch,
+                        error.InvalidPacking,
                         => {},
                     }
 
@@ -280,6 +281,7 @@ const Node = struct {
                     error.InvalidOffset,
                     error.OutputTooSmall,
                     error.OutputSizeMismatch,
+                    error.InvalidPacking,
                     => {},
                 }
 

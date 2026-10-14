@@ -1438,10 +1438,10 @@ input: RepeatableReadableIO = .{},
 /// this setting, so disabling compression can increase physical memory usage
 /// but does not change how much history is retained.
 ///
-/// Text-heavy terminal history generally compresses to approximately 10% to
-/// 30% of its uncompressed page memory, corresponding to a 70% to 90% reduction
-/// in physical memory for pages which are compressed. Compression savings are
-/// content-dependent.
+/// Text-heavy terminal history generally compresses to approximately 5% to
+/// 15% of its uncompressed page memory, corresponding to an 85% to 95%
+/// reduction in physical memory for pages which are compressed. Compression
+/// savings are content-dependent.
 ///
 /// Note that the way Ghostty works is that we compress and discard the
 /// physical/resident memory but we retain virtual mappings. You will not
