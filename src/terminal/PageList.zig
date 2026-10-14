@@ -3819,17 +3819,19 @@ pub fn split(
 /// The active rows move to a new page with the boundary page's capacity (see
 /// `split`), so the boundary page's memory is released as a whole. Its history
 /// rows first top up the newest history page to a standard page's rows, and
-/// any rest form a page of their own. Both are exact size: history pages keep
-/// the row boundaries they would have had without this, and the byte limit
-/// charges them for their contents rather than for a whole page.
+/// any rest form a page of their own, so history pages keep the row boundaries
+/// they would have had without this. Like other pages, they come from the page
+/// pool and the byte limit charges each as a whole page, so pruning stays in
+/// step with a terminal that never splits, up to its oldest page.
 ///
 /// This acts only when compression is supported and the boundary page is the
 /// last page, is resident, holds at least a screenful of history, and is not
-/// scrolled into view. It returns whether it moved any rows. Tracked pins follow their rows, but the
-/// active rows change pages, which invalidates untracked pins and row or cell
-/// pointers into them, as well as page-scoped IDs held for them, such as a
-/// screen cursor's style and hyperlink (`Screen.splitBoundary` handles the
-/// cursor). Like compression, call this when idle rather than per write.
+/// scrolled into view. It returns whether it moved any rows. Tracked pins
+/// follow their rows, but the active rows change pages, which invalidates
+/// untracked pins and row or cell pointers into them, as well as page-scoped
+/// IDs held for them, such as a screen cursor's style and hyperlink
+/// (`Screen.splitBoundary` handles the cursor). Like compression, call this
+/// when idle rather than per write.
 pub fn splitBoundary(self: *PageList) bool {
     // Without compression, splitting only costs.
     if (!terminal_mem.canReclaim(.strict)) return false;
@@ -3872,11 +3874,11 @@ pub fn splitBoundary(self: *PageList) bool {
         const std_rows = initialCapacity(self.cols).rows;
         if (p.rows() >= std_rows or p.cols() != page.size.cols) break :top_up;
         const n = @min(rows, std_rows - p.rows());
-        joined = self.cloneExact(p.page(), page, 0, n) orelse break :top_up;
+        joined = self.cloneRows(p.page(), page, 0, n) orelse break :top_up;
         prev = p;
         start = n;
     }
-    const rest: ?*List.Node = if (start == rows) null else self.cloneExact(
+    const rest: ?*List.Node = if (start == rows) null else self.cloneRows(
         null,
         page,
         start,
@@ -3907,15 +3909,16 @@ pub fn splitBoundary(self: *PageList) bool {
     self.pages.remove(node);
     self.destroyNode(node);
 
-    // Exact pages charge the history rows apart from the new active page.
+    // The new active page is one more page charged against the byte limit.
     self.limits.enforce(self, .bytes);
     return true;
 }
 
-/// Create a detached exact-size page holding all of `prefix`'s rows, if any,
-/// followed by rows `[y_start, y_end)` of `src`. Returns null if allocating or
-/// cloning fails.
-fn cloneExact(
+/// Create a detached page with the exact capacity for all of `prefix`'s rows,
+/// if any, followed by rows `[y_start, y_end)` of `src`. Like any other page,
+/// it comes from the page pool when it fits there. Returns null if allocating
+/// or cloning fails.
+fn cloneRows(
     self: *PageList,
     prefix: ?*const Page,
     src: *const Page,
@@ -3935,7 +3938,7 @@ fn cloneExact(
         cap.string_bytes +|= more.string_bytes;
     }
 
-    const node = self.createPage(.{ .cap = cap, .exact_size = true }) catch return null;
+    const node = self.createPage(.{ .cap = cap }) catch return null;
     const page = node.page();
     page.size.rows = cap.rows;
     if (prefix) |p| page.cloneFrom(p, 0, prefix_rows) catch {
@@ -4284,17 +4287,16 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
     const page = next_node.page();
     page.size.rows = 1;
 
+    // We should never be more than our max size here because we've
+    // verified the case above.
     page.assertIntegrity();
 
     // Record the increased row count
     self.total_rows += 1;
 
     // Appending a page can cross the line limit and can make the oldest
-    // active-boundary page wholly historical. Pruning a heap page smaller
-    // than the new one (see `splitBoundary`) can leave the byte limit
-    // crossed too.
+    // active-boundary page wholly historical.
     self.limits.enforce(self, .lines);
-    self.limits.enforce(self, .bytes);
     return next_node;
 }
 
@@ -20744,7 +20746,7 @@ fn expectRowsMarkedForTest(self: *PageList) !void {
     try std.testing.expectEqual(self.total_rows + 1, mark);
 }
 
-test "PageList splitBoundary moves boundary history into an exact page" {
+test "PageList splitBoundary moves boundary history into its own page" {
     const testing = std.testing;
 
     var s = try init(testing.allocator, .{ .cols = 80, .rows = 24 });
@@ -20758,13 +20760,13 @@ test "PageList splitBoundary moves boundary history into an exact page" {
     try testing.expect(s.splitBoundary());
 
     // The active rows now start a page of their own, and the boundary
-    // history sits in an exact page behind them.
+    // history sits in a pool page behind them, charged like any other.
     const active = s.getTopLeft(.active);
     try testing.expectEqual(s.pages.last.?, active.node);
     try testing.expectEqual(0, active.y);
     try testing.expectEqual(s.rows, active.node.rows());
     const history = active.node.prev.?;
-    try testing.expectEqual(.heap, history.owned);
+    try testing.expectEqual(.pool, history.owned);
     try testing.expectEqual(100 - s.rows, history.rows());
     try testing.expectEqual(3, s.totalPages());
     try testing.expectEqual(total_rows, s.total_rows);
@@ -20805,7 +20807,7 @@ test "PageList splitBoundary tops up the newest history page" {
     try testing.expectEqual(3, s.totalPages());
     try testing.expectEqual(std_rows, s.pages.first.?.rows());
     try testing.expectEqual(history_rows - std_rows, s.pages.first.?.next.?.rows());
-    try testing.expectEqual(.heap, s.pages.first.?.next.?.owned);
+    try testing.expectEqual(.pool, s.pages.first.?.next.?.owned);
     try s.expectRowsMarkedForTest();
 }
 
@@ -20887,9 +20889,9 @@ test "PageList splitBoundary keeps the byte limit" {
     const testing = std.testing;
 
     // Two lists fed the same rows, one splitting its boundary as if idle
-    // every so often. Exact history pages must not push the split list past
-    // its byte limit, and pruning, being page granular, keeps it within a
-    // page of the other list's history.
+    // every so often. Splitting must not push that list past its byte limit,
+    // and since its history pages are charged like the other list's, pruning
+    // keeps the two within a page of each other in either direction.
     const max_size = 6 * PagePool.item_size;
     var plain = try init(testing.allocator, .{ .cols = 80, .rows = 24, .max_size = max_size });
     defer plain.deinit();
@@ -20905,23 +20907,7 @@ test "PageList splitBoundary keeps the byte limit" {
         }
         try testing.expect(split_list.page_size <= split_list.limits.max(.bytes));
         try testing.expect(split_list.total_rows + initialCapacity(80).rows >= plain.total_rows);
-    }
-}
-
-test "PageList grow keeps the byte limit after pruning a small heap page" {
-    const testing = std.testing;
-
-    var s = try init(testing.allocator, .{ .cols = 80, .rows = 24, .max_size = 3 * PagePool.item_size });
-    defer s.deinit();
-
-    // An exact first page leaves room under the limit for another
-    // standard page that pruning it alone doesn't make up for.
-    while (s.pages.last.?.rows() < 50) _ = try s.grow();
-    try testing.expect(s.splitBoundary());
-    try testing.expectEqual(.heap, s.pages.first.?.owned);
-    while (s.pages.first.?.owned == .heap) {
-        _ = try s.grow();
-        try testing.expect(s.page_size <= s.limits.max(.bytes));
+        try testing.expect(split_list.total_rows <= plain.total_rows + initialCapacity(80).rows);
     }
 }
 
