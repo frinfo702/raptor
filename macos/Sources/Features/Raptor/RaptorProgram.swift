@@ -41,9 +41,10 @@ struct RaptorProgram: Equatable {
         "opencode": "opencode",
     ]
 
-    /// A card's image for a light or dark theme; a card with one image serves both.
-    static func cardImage(_ card: String, light: Bool) -> NSImage? {
-        NSImage(named: "\(card)-\(light ? "light" : "dark")") ?? NSImage(named: card)
+    /// The imageset that draws a card on a light or dark theme; a card with one image
+    /// serves both. Nil if the card has no art.
+    static func cardAsset(_ card: String, light: Bool) -> String? {
+        ["\(card)-\(light ? "light" : "dark")", card].first { NSImage(named: $0) != nil }
     }
 
     /// Programs by process name.
@@ -119,7 +120,8 @@ struct RaptorTileCluster: View {
     var body: some View {
         HStack(spacing: 0) {
             Group {
-                if let card = program.card, let image = RaptorProgram.cardImage(card, light: light) {
+                if let card = program.card, let asset = RaptorProgram.cardAsset(card, light: light),
+                   let image = NSImage(named: asset) {
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFit()
