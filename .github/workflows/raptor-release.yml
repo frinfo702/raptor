@@ -45,6 +45,38 @@ jobs:
       - name: Upload DMG
         run: gh release upload "$TAG" "$DMG" --clobber --repo "$GITHUB_REPOSITORY"
 
+      # The app's updater reads appcast.xml from the fixed raptor-appcast
+      # prerelease, which never becomes Latest. Without the signing key the
+      # DMG still ships and the existing feed is left untouched. Only the
+      # newest raptor-v* tag may move the feed, so it never goes backwards.
+      - name: Upload Sparkle appcast
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          SPARKLE_VERSION: 2.9.6
+        run: |
+          set -euo pipefail
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "::warning::SPARKLE_PRIVATE_KEY is not set; skipping appcast.xml, so installed apps will not see $TAG as an update"
+            exit 0
+          fi
+          newest="$(git ls-remote --tags --refs origin 'raptor-v*' | sed 's#.*refs/tags/##' | sort -V | tail -1)"
+          if [ "$TAG" != "$newest" ]; then
+            echo "::notice::$TAG is not the newest Raptor release ($newest); leaving appcast.xml untouched"
+            exit 0
+          fi
+          if [ ! -f dist/macos/raptor-appcast.sh ]; then
+            echo "::notice::$TAG predates the Raptor updater; leaving appcast.xml untouched"
+            exit 0
+          fi
+          mkdir -p .action/sparkle
+          curl -fsSL "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-for-Swift-Package-Manager.zip" > .action/sparkle/sparkle.zip
+          unzip -q .action/sparkle/sparkle.zip -d .action/sparkle
+          PATH="$PWD/.action/sparkle/bin:$PATH" dist/macos/raptor-appcast.sh "$TAG" "$DMG"
+          gh release view raptor-appcast --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create raptor-appcast --prerelease --title "Raptor update feed" \
+              --notes "Sparkle appcast for Raptor's updater. Do not delete." --repo "$GITHUB_REPOSITORY"
+          gh release upload raptor-appcast appcast.xml --clobber --repo "$GITHUB_REPOSITORY"
+
       - name: Append install notes
         run: |
           marker="<!-- raptor-dmg-notes -->"
@@ -63,5 +95,7 @@ jobs:
           - Open Raptor once, then go to System Settings → Privacy & Security
             and click **Open Anyway**, or
           - run \`xattr -dr com.apple.quarantine /Applications/Raptor.app\`.
+
+          Later versions install through Raptor → Check for Updates.
           EOF
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
