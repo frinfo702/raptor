@@ -3,7 +3,9 @@
 #
 #   dist/macos/raptor-dmg.sh <raptor-vX.Y.Z tag> [zig command...]
 #
-# Writes Raptor-X.Y.Z.dmg to the repository root and prints its path.
+# Builds the source tree in $RAPTOR_SRC (default: this script's repository),
+# so CI can build an old tag with current tooling. Writes Raptor-X.Y.Z.dmg
+# to that tree's root and prints its path.
 # The zig command defaults to `zig`; locally use `direnv exec . zig`.
 set -euo pipefail
 
@@ -15,7 +17,7 @@ version="${BASH_REMATCH[1]}"
 zig=("$@")
 [ ${#zig[@]} -gt 0 ] || zig=(zig)
 
-cd "$(dirname "$0")/../.."
+cd "${RAPTOR_SRC:-$(dirname "$0")/../..}"
 # Native (arm64 on Apple silicon) because the bundled rap is built for
 # the host only; a universal app would ship an arm64-only rap.
 # An explicit version skips git tag detection, which rejects raptor-v* tags.
