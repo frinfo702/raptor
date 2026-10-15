@@ -67,7 +67,7 @@ struct RaptorCardStackTests {
 
     @Test func atMostTwoCardsBehind() {
         #expect(cards("zsh", ["claude", "codex", "git", "zsh"]) == ["shell", "claudecode", "codex"])
-        #expect(cards("vim", []) == [nil])
+        #expect(cards("make", []) == [nil])
     }
 
     /// A process goes by the name it runs as when Raptor knows it: Claude Code's version-named
