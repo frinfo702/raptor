@@ -78,12 +78,11 @@ struct RaptorProgram: Equatable {
         "gemini": .init(name: "Gemini", icon: .symbol("sparkle"), tile: rgb(0x2F4F7A), glyph: rgb(0xBFD8F5), isAgent: true),
     ]
 
-    /// The name a process goes by: its command name, unless only the name it was run as
-    /// (argv[0], without a login shell's "-") is one Raptor knows. Claude Code's binary is
-    /// named for its version ("2.1.299") but run as "claude".
+    /// The name a process goes by: the name it was run as (argv[0], without a login shell's
+    /// "-") if Raptor knows it, else its command name. Claude Code's binary is named for its
+    /// version ("2.1.299") but run as "claude"; Cursor's agent is node run as "cursor-agent".
     static func processName(_ name: String?, argv0: String?) -> String? {
         let known = { (n: String) in shells.contains(n) || Self.known[n] != nil || cards[n] != nil }
-        if let name, known(name) { return name }
         guard let argv0 else { return name }
         let runAs = String((argv0 as NSString).lastPathComponent.drop { $0 == "-" })
         return known(runAs) ? runAs : name
