@@ -47,6 +47,8 @@ struct RaptorAppearanceTests {
         let a = RaptorAppearance(defaults: fresh(), environment: [:])
         a.style = .solid
         #expect(a.config.contains("unfocused-split-opacity = 1"))
+        #expect(a.config.contains("window-padding-x = 8\n"))
+        #expect(a.config.contains("window-padding-y = 4\n"))
         #expect(a.config.contains("background-opacity = 1.0\n"))
         a.style = .blended
         #expect(RaptorAppearance.paneOpacity == RaptorWindowBackground.tint)

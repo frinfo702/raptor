@@ -152,6 +152,10 @@ final class RaptorAppearance: ObservableObject {
             "unfocused-split-opacity = 1",
             "font-thicken = \(fontSmoothing)",
             "window-padding-color = \(paddingColor.rawValue)",
+            // Ghostty's 2 pt default is lost under a card's rounded rim, leaving the
+            // text against the frame; give it room as other terminals do.
+            "window-padding-x = 8",
+            "window-padding-y = 4",
             // Rex's pane chords. ⌘K is the Change Session menu item.
             "keybind = super+k=unbind",
             "keybind = super+enter=new_split:auto",
