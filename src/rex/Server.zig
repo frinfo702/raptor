@@ -1556,6 +1556,7 @@ const methods = std.StaticStringMap(Handler).initComptime(.{
     .{ "session.new_window", &sessionNewWindow },
     .{ "session.new_split", &sessionNewSplit },
     .{ "session.move_block", &sessionMoveBlock },
+    .{ "session.resize_split", &sessionResizeSplit },
     .{ "session.close_window", &sessionCloseWindow },
     .{ "session.zoom_block", &sessionZoomBlock },
     .{ "session.focus", &sessionFocus },
@@ -1999,6 +2000,25 @@ fn sessionMoveBlock(self: *Server, req: *Request, w: *Stringify) Error!void {
     try w.write(.{});
 }
 
+/// Set the share of the split between a block and another of its window
+/// that the block's side takes, as a divider dragged between two panes.
+/// The block must be on the split's first side: left of or above the target.
+fn sessionResizeSplit(self: *Server, req: *Request, w: *Stringify) Error!void {
+    const t = try self.resolve(req);
+    const q = req.str("target") orelse return req.fail(error.Usage, "target is required", .{});
+    const target = try match(Pane, "block", try t.window.tree.leaves(req.arena), q, req);
+    const ratio: f64 = switch (req.get("ratio") orelse return req.fail(error.Usage, "ratio is required", .{})) {
+        .float => |f| f,
+        .integer => |i| @floatFromInt(i),
+        else => return req.fail(error.Usage, "ratio must be a number", .{}),
+    };
+    if (!(ratio > 0 and ratio < 1)) return req.fail(error.Usage, "ratio must be between 0 and 1", .{});
+    t.window.tree.resize(t.pane, target, ratio) catch
+        return req.fail(error.Usage, "the block must be left of or above the target", .{});
+    self.viewChanged(t.session);
+    try w.write(.{});
+}
+
 fn sessionCloseWindow(self: *Server, req: *Request, w: *Stringify) Error!void {
     self.closeWindow((try self.resolve(req)).window);
     try w.write(.{});
@@ -2330,11 +2350,47 @@ test "rex Server: sessions over the socket" {
     try testing.expect(std.mem.indexOf(u8, view, "\"type\":\"vertical\"") != null);
     try testing.expect(std.mem.indexOf(u8, view, "\"revision\":2") != null);
 
-    // Moving the first block below the second puts the second on top, and
-    // the view shows it rather than the old layout.
     const split_parsed = try std.json.parseFromSlice(std.json.Value, alloc, split, .{});
     defer split_parsed.deinit();
     const second = split_parsed.value.object.get("result").?.object.get("block").?.string;
+
+    // A resized split keeps its ratio when focus moves to the other block,
+    // as a click on the other pane after dragging the divider.
+    const resize_req = try std.fmt.allocPrint(alloc,
+        \\{{"id":56,"method":"session.resize_split","params":{{"session":"demo","block":"1","target":"{s}","ratio":0.3}}}}
+    , .{second});
+    defer alloc.free(resize_req);
+    const resized = try T.call(fd, resize_req);
+    defer alloc.free(resized);
+    try testing.expectEqualStrings("{\"id\":56,\"result\":[]}", resized);
+    const focus_req = try std.fmt.allocPrint(alloc,
+        \\{{"id":57,"method":"session.focus","params":{{"session":"demo","block":"{s}"}}}}
+    , .{second});
+    defer alloc.free(focus_req);
+    const focused = try T.call(fd, focus_req);
+    defer alloc.free(focused);
+    const resized_view = try T.call(fd,
+        \\{"id":58,"method":"session.view","params":{"session":"demo"}}
+    );
+    defer alloc.free(resized_view);
+    try testing.expect(std.mem.indexOf(u8, resized_view, "\"type\":\"vertical\",\"ratio\":0.3,") != null);
+    // The block must be on the split's first side, and the ratio inside it.
+    const view_parsed = try std.json.parseFromSlice(std.json.Value, alloc, resized_view, .{});
+    defer view_parsed.deinit();
+    const first = view_parsed.value.object.get("result").?.object.get("windows").?.array.items[0]
+        .object.get("blocks").?.array.items[0].object.get("id").?.string;
+    for ([_][2][]const u8{ .{ second, first }, .{ first, second } }, [_][]const u8{ "0.3", "1" }) |pair, ratio| {
+        const bad_req = try std.fmt.allocPrint(alloc,
+            \\{{"id":59,"method":"session.resize_split","params":{{"session":"demo","block":"{s}","target":"{s}","ratio":{s}}}}}
+        , .{ pair[0], pair[1], ratio });
+        defer alloc.free(bad_req);
+        const refused = try T.call(fd, bad_req);
+        defer alloc.free(refused);
+        try testing.expect(std.mem.indexOf(u8, refused, "\"error\"") != null);
+    }
+
+    // Moving the first block below the second puts the second on top, and
+    // the view shows it rather than the old layout.
     const move_req = try std.fmt.allocPrint(alloc,
         \\{{"id":53,"method":"session.move_block","params":{{"session":"demo","block":"1","target":"{s}","direction":"down"}}}}
     , .{second});
@@ -2353,9 +2409,9 @@ test "rex Server: sessions over the socket" {
         \\{{"id":55,"method":"session.move_block","params":{{"session":"demo","block":"{s}","target":"{s}","direction":"up"}}}}
     , .{ second, second });
     defer alloc.free(beside_itself);
-    const refused = try T.call(fd, beside_itself);
-    defer alloc.free(refused);
-    try testing.expect(std.mem.indexOf(u8, refused, "\"error\"") != null);
+    const refused_move = try T.call(fd, beside_itself);
+    defer alloc.free(refused_move);
+    try testing.expect(std.mem.indexOf(u8, refused_move, "\"error\"") != null);
 
     // Block positions count within the active window only.
     const window = try T.call(fd,

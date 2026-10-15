@@ -17,8 +17,9 @@ pub fn Tree(comptime Leaf: type) type {
 
         pub const Split = struct {
             dir: Dir,
-            /// The share of the split that `a` takes.
-            ratio: f32 = 0.5,
+            /// The share of the split that `a` takes. Clients' own
+            /// ratios are f64, so they come back from a view unchanged.
+            ratio: f64 = 0.5,
             a: *Node,
             b: *Node,
         };
@@ -100,6 +101,24 @@ pub fn Tree(comptime Leaf: type) type {
             a.* = node.*;
             b.* = .{ .leaf = leaf };
             node.* = .{ .split = .{ .dir = dir, .a = if (before) b else a, .b = if (before) a else b } };
+        }
+
+        /// Set the share of the split dividing `a` from `b` that `a`'s side
+        /// takes. `a` must be on the split's first side.
+        pub fn resize(self: *Self, a: Leaf, b: Leaf, ratio: f64) error{NotFound}!void {
+            if (a == b or !self.contains(a) or !self.contains(b)) return error.NotFound;
+            var node = self.root;
+            while (true) {
+                const s = &node.split;
+                const a_first = find(s.a, a) != null;
+                if (a_first == (find(s.a, b) != null)) {
+                    node = if (a_first) s.a else s.b;
+                    continue;
+                }
+                if (!a_first) return error.NotFound;
+                s.ratio = ratio;
+                return;
+            }
         }
 
         /// The top-left leaf.
@@ -212,6 +231,17 @@ test "rex layout: split, remove, and order" {
     try testing.expectError(error.NotFound, t.move(alloc, 1, 1, .vertical, false));
     try testing.expectError(error.NotFound, t.move(alloc, 9, 1, .vertical, false));
     try testing.expectEqual(3, t.count());
+
+    // Resizing sets the ratio of the split between the two leaves, and only
+    // with the first leaf on the split's first side.
+    try t.resize(3, 2, 0.25);
+    try testing.expectEqual(0.25, t.root.split.ratio);
+    try t.resize(1, 3, 0.75);
+    try testing.expectEqual(0.75, t.root.split.a.split.ratio);
+    try testing.expectEqual(0.25, t.root.split.ratio);
+    try testing.expectError(error.NotFound, t.resize(2, 1, 0.5));
+    try testing.expectError(error.NotFound, t.resize(1, 1, 0.5));
+    try testing.expectError(error.NotFound, t.resize(1, 9, 0.5));
 
     // Removing a leaf gives its space to its sibling.
     t.remove(alloc, 3);
