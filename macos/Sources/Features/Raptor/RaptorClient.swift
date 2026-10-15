@@ -28,6 +28,9 @@ final class RaptorClient {
     /// size owner, so each window needs its own. Never freed: surfaces point into them.
     private var streams: [rap_client_t] = []
 
+    /// Every session's tabs, for the windows' sidebars.
+    private(set) lazy var sidebar = RaptorSidebarModel(client: self)
+
     /// Connect to the server on `socket`, else on the default socket, starting it if needed.
     init?(socket: String? = nil) {
         guard Self.startServer(socket: socket), let client = rap_client_connect(socket) else {
@@ -43,6 +46,7 @@ final class RaptorClient {
             DispatchQueue.main.async { me.handle(data) }
         }, Unmanaged.passRetained(self).toOpaque())
         call("session.subscribe")
+        sidebar.setNeedsReload()
     }
 
     // MARK: Server
@@ -116,6 +120,22 @@ final class RaptorClient {
         return result != nil
     }
 
+    struct BlockProcess: Decodable {
+        struct Foreground: Decodable {
+            let pid: Int
+            let name: String?
+            let argv0: String?
+        }
+        let pid: Int
+        let foreground: Foreground?
+    }
+
+    /// The name of the block's foreground program, asked of the server.
+    func foregroundName(_ block: String) -> String? {
+        let p: BlockProcess? = call("block.method", ["block": block, "method": "process"])
+        return RaptorProgram.processName(p?.foreground?.name, argv0: p?.foreground?.argv0)
+    }
+
     // MARK: Events
 
     private struct Event: Decodable {
@@ -125,6 +145,11 @@ final class RaptorClient {
         let title: String?
         let pwd: String?
         let foreground: Foreground?
+        /// A program status record's id, nil for the block's root record.
+        let id: String?
+        let record: RaptorController.SessionView.Status?
+        /// The ids of removed records, null for the root one.
+        let ids: [String?]?
 
         struct Foreground: Decodable {
             let name: String?
@@ -134,6 +159,7 @@ final class RaptorClient {
 
     private func handle(_ data: Data) {
         guard let event = try? JSONDecoder().decode(Event.self, from: data) else { return }
+        updateSidebar(event)
         switch event.event {
         case "server_reconnected":
             controllers.forEach { $0.refresh() }
@@ -158,6 +184,27 @@ final class RaptorClient {
             default:
                 break
             }
+        }
+    }
+
+    private func updateSidebar(_ event: Event) {
+        switch (event.event, event.block) {
+        case ("title_changed", let block?):
+            sidebar.titleChanged(block: block, to: event.title ?? "")
+        case ("pwd_changed", let block?):
+            sidebar.pwdChanged(block: block, to: event.pwd ?? "")
+        case ("process_changed", let block?):
+            sidebar.processChanged(
+                block: block, to: RaptorProgram.processName(event.foreground?.name, argv0: event.foreground?.argv0))
+        case ("program_status_changed", let block?) where event.id == nil:
+            sidebar.statusChanged(block: block, to: event.record)
+        case ("program_status_removed", let block?) where event.ids?.contains(where: { $0 == nil }) == true:
+            sidebar.statusChanged(block: block, to: nil)
+        case ("session_view_changed", _), ("session_label_changed", _), ("window_label_changed", _),
+             ("session_created", _), ("session_destroyed", _), ("server_reconnected", _):
+            sidebar.setNeedsReload()
+        default:
+            break
         }
     }
 

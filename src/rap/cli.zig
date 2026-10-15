@@ -50,7 +50,8 @@ pub const usage =
     \\  -S <socket>   Server socket (default: $RAP_SERVER, else per user)
     \\  --json        Print results as JSON
     \\
-    \\Inside a rap block, RAP_SESSION and RAP_BLOCK are the default targets.
+    \\Inside a rap block, RAP_SESSION and RAP_BLOCK are the default targets,
+    \\and windows and sessions made with run and new belong under that block.
     \\Set RAP_AUTOSTART=0 to never start a server on demand.
     \\
 ;
@@ -366,6 +367,7 @@ const Ctx = struct {
             .command = self.args.command,
             .cwd = self.cwd(),
             .env = try self.sessionEnv(),
+            .parent = self.env.get("RAP_BLOCK"),
         })) {
             .result => |v| v,
             .failed => |code| return code,
@@ -384,6 +386,7 @@ const Ctx = struct {
             .command = command,
             .cwd = self.cwd(),
             .wait = self.args.wait,
+            .parent = self.env.get("RAP_BLOCK"),
         };
         var resp = try self.call("session.list", .{});
         const none = resp == .result and resp.result.object.get("sessions").?.array.items.len == 0;
@@ -393,6 +396,7 @@ const Ctx = struct {
                 .cwd = params.cwd,
                 .env = try self.sessionEnv(),
                 .wait = self.args.wait,
+                .parent = params.parent,
             })
         else
             try self.call("session.new_window", params);

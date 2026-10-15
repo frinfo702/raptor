@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 import SystemConfiguration
 
-/// The title bar, holding the session item and the tab strip, above the active tab's
-/// panes: islands (cards with the chrome between them) or compact (1 px dividers).
+/// The active tab's panes, islands (cards with the chrome between them) or compact
+/// (1 px dividers), beside the sidebar or under the title bar of the session item and
+/// the tab strip. With the sidebar the cards start at the traffic lights' row, as in Rex.
 struct RaptorWindowView: View {
     @ObservedObject var ghostty: Ghostty.App
     @ObservedObject var controller: RaptorController
@@ -19,31 +20,27 @@ struct RaptorWindowView: View {
 
     var body: some View {
         let tokens = tokens
-        VStack(spacing: 0) {
-            titlebar(tokens)
-
-            if !islands {
-                Rectangle()
-                    .fill(Color(nsColor: tokens.hairline))
-                    .frame(height: 1)
-            }
-
-            TerminalView(ghostty: ghostty, viewModel: controller, delegate: controller)
-                .environment(\.terminalCommandPalette, false)
-                .environment(\.splitDividerColor, islands ? .clear : Color(nsColor: tokens.hairline))
-                .environment(\.splitDividerSize, islands ? Self.islandGutter : 1)
-                .environment(\.splitLeafWrapper) { surface, content in
-                    AnyView(RaptorPane(
-                        ghostty: ghostty,
-                        controller: controller,
-                        appearance: appearance,
-                        surface: surface,
-                        content: content))
+        let sidebar = appearance.sidebar
+        HStack(spacing: 0) {
+            if sidebar {
+                RaptorSidebar(model: controller.client.sidebar, controller: controller, appearance: appearance, tokens: tokens)
+                if !islands {
+                    Rectangle()
+                        .fill(Color(nsColor: tokens.hairline))
+                        .frame(width: 1)
                 }
-                // Below the title bar the cards sit a little closer than at the sides,
-                // as in Rex.
-                .padding(.top, islands ? Self.islandInset - 2 : 0)
-                .padding([.leading, .trailing, .bottom], islands ? Self.islandInset : 0)
+            }
+            VStack(spacing: 0) {
+                if !sidebar {
+                    titlebar(tokens)
+                    if !islands {
+                        Rectangle()
+                            .fill(Color(nsColor: tokens.hairline))
+                            .frame(height: 1)
+                    }
+                }
+                panes(tokens)
+            }
         }
         .backgroundPreferenceValue(RaptorPaneFrames.self) { panes in
             GeometryReader { proxy in
@@ -83,13 +80,33 @@ struct RaptorWindowView: View {
         .ignoresSafeArea(.container, edges: .top)
     }
 
+    private func panes(_ tokens: ThemeTokens) -> some View {
+        TerminalView(ghostty: ghostty, viewModel: controller, delegate: controller)
+            .environment(\.terminalCommandPalette, false)
+            .environment(\.splitDividerColor, islands ? .clear : Color(nsColor: tokens.hairline))
+            .environment(\.splitDividerSize, islands ? Self.islandGutter : 1)
+            .environment(\.splitLeafWrapper) { surface, content in
+                AnyView(RaptorPane(
+                    ghostty: ghostty,
+                    controller: controller,
+                    appearance: appearance,
+                    surface: surface,
+                    content: content))
+            }
+            // Below the title bar the cards sit a little closer than at the sides,
+            // as in Rex; beside the sidebar they start at its edge.
+            .padding(.top, islands ? (appearance.sidebar ? Self.islandInset : Self.islandInset - 2) : 0)
+            .padding(.leading, islands && !appearance.sidebar ? Self.islandInset : 0)
+            .padding([.trailing, .bottom], islands ? Self.islandInset : 0)
+    }
+
     /// The palette's top edge below the window's, as in Rex: 36 pt under the title bar.
     static let paletteTop: CGFloat = 76
 
     private func titlebar(_ tokens: ThemeTokens) -> some View {
         HStack(spacing: 0) {
-            RaptorTitlebarButton(symbol: "rectangle.stack", help: "Change Session") {
-                controller.sessionPopoverIsShowing.toggle()
+            RaptorTitlebarButton(symbol: "sidebar.left", help: "Show Sidebar ⌃⌘S") {
+                appearance.sidebar = true
             }
             .padding(.trailing, 6)
             Button { controller.sessionPopoverIsShowing.toggle() } label: {

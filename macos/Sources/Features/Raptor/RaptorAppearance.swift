@@ -83,6 +83,11 @@ final class RaptorAppearance: ObservableObject {
             applyConfig()
         }
     }
+    /// The vertical sidebar of every session's tabs, in place of the tab strip.
+    @Published var sidebar: Bool { didSet { save(sidebar, Keys.sidebar) } }
+    /// Activity Mode: the sidebar shows only tabs with an agent or a program status,
+    /// each with its status line.
+    @Published var activity: Bool { didSet { save(activity, Keys.activity) } }
     @Published var paddingColor: PaddingColor {
         didSet {
             save(paddingColor.rawValue, Keys.paddingColor)
@@ -97,6 +102,8 @@ final class RaptorAppearance: ObservableObject {
         static let translucentPanes = "RaptorTranslucentPanes"
         static let fontSmoothing = "RaptorFontSmoothing"
         static let paddingColor = "RaptorPaddingColor"
+        static let sidebar = "RaptorSidebar"
+        static let activity = "RaptorActivity"
     }
 
     private let defaults: UserDefaults
@@ -111,6 +118,8 @@ final class RaptorAppearance: ObservableObject {
         paneHeaders = value(Keys.paneHeaders, "RAPTOR_PANE_HEADERS").map { $0 == "1" || $0 == "true" } ?? true
         translucentPanes = value(Keys.translucentPanes, "RAPTOR_TRANSLUCENT_PANES").map { $0 == "1" || $0 == "true" } ?? true
         fontSmoothing = defaults.bool(forKey: Keys.fontSmoothing)
+        sidebar = value(Keys.sidebar, "RAPTOR_SIDEBAR").map { $0 == "1" || $0 == "true" } ?? true
+        activity = value(Keys.activity, "RAPTOR_ACTIVITY").map { $0 == "1" || $0 == "true" } ?? false
         paddingColor = defaults.string(forKey: Keys.paddingColor).flatMap(PaddingColor.init) ?? .background
     }
 
