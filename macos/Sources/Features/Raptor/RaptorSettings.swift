@@ -33,6 +33,11 @@ struct RaptorSettingsView: View {
                     ForEach(RaptorAppearance.Density.allCases) { Text($0.name).tag($0) }
                 }
                 Toggle("Pane headers", isOn: $appearance.paneHeaders)
+                Toggle(isOn: $appearance.translucentPanes) {
+                    Text("Translucent panes")
+                    Text("Blended and Glass show the desktop through panes as through the window around them. A background-opacity in your config file takes precedence.")
+                }
+                .disabled(appearance.effectiveStyle == .solid)
             }
             Section {
                 Button("Open Config File…") {

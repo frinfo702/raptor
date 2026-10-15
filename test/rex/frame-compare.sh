@@ -18,7 +18,16 @@
 #         divider #1E2226, 34 pt headers, #0B1212 when unfocused, the pane
 #         background when focused;
 #   fresh (default theme; Blended, islands, headers pinned to the default
-#         values so saved Settings can't leak in): islands with headers;
+#         values so saved Settings can't leak in): islands with headers, their
+#         bodies the chrome's colour and their rims a 15% white sheen over it;
+#   translucent (bg #0A0C10 dark and #F8F6FB light; Blended and Glass,
+#         islands, headers), each over a flat black and a flat white window:
+#         a pane body lets through as much of what's behind the window as the
+#         chrome does (within 2%), and at least 20%, so the desktop shows
+#         through it as in the captain's Rex frame (captain-rex-reference.png);
+#         the island rim lifts the body toward white by 15% on dark themes and
+#         toward black by 10% on light ones, as Rex's lifts what shows through;
+#   opaque (Blended with Translucent panes off): the body lets nothing through;
 #   palette (bg #232831, accent #8060B5, vs v3_4fps_006.jpg): the command
 #         palette 330 pt wide, centred, 76 pt below the window top, 16 rows
 #         of 28 pt, #30343F, with shortcut glyphs at the rows' trailing edge;
@@ -65,6 +74,21 @@ for w in list where (w[kCGWindowName as String] as? String) == CommandLine.argum
 EOF
 swiftc -o "$tmp/win" "$tmp/win.swift" 2>/dev/null
 
+# A flat-coloured window to put behind Raptor: backdrop x y w h RRGGBB.
+cat >"$tmp/backdrop.swift" <<'EOF'
+import AppKit
+let a = CommandLine.arguments
+let v = Int(a[5], radix: 16)!
+let window = NSWindow(contentRect: NSRect(x: Double(a[1])!, y: Double(a[2])!, width: Double(a[3])!, height: Double(a[4])!),
+                      styleMask: [.borderless], backing: .buffered, defer: false)
+window.backgroundColor = NSColor(srgbRed: CGFloat(v >> 16 & 255) / 255, green: CGFloat(v >> 8 & 255) / 255,
+                                 blue: CGFloat(v & 255) / 255, alpha: 1)
+NSApplication.shared.setActivationPolicy(.accessory)
+window.orderFrontRegardless()
+NSApplication.shared.run()
+EOF
+swiftc -o "$tmp/backdrop" "$tmp/backdrop.swift" 2>/dev/null
+
 # The main screen's size in points, for the window frame given to the app.
 screen=$(swift -e 'import AppKit; let f = NSScreen.screens[0].frame; print(Int(f.width), Int(f.height))' 2>/dev/null)
 sw=${screen% *}
@@ -102,7 +126,9 @@ within() {
 }
 
 # Run one theme: $1 name, $2 background (empty for the default theme), then
-# appearance settings as RAPTOR_*=value.
+# appearance settings as RAPTOR_*=value. With $backdrop set (RRGGBB), a window of
+# that colour sits behind Raptor and the shot is the screen under the window, so
+# it holds what the window lets through; otherwise it is the window alone.
 shoot() {
     name=$1
     sock=/tmp/raptor-fc-$$-$name.sock
@@ -129,7 +155,15 @@ shoot() {
     # The window takes its frame from its autosave name, set here for this launch
     # only: 1080x720 pt, 80 pt from the screen's top left.
     sid=$("$rap" ls | awk -v n="fc-$name" '$1 == n { print $4 }')
-    env "$@" XDG_CONFIG_HOME="$tmp/xdg-$name" GHOSTTY_CONFIG_PATH="$tmp/config" \
+    bp=
+    if [ -n "${backdrop:-}" ]; then
+        "$tmp/backdrop" 40 $((sh - 840)) 1160 800 "$backdrop" &
+        bp=$!
+        sleep 0.5
+    fi
+    # Pretending to run under Xcode keeps the frame arguments out of Ghostty's
+    # config, whose error window would otherwise cover a screen shot.
+    env "$@" __XCODE_BUILT_PRODUCTS_DIR_PATHS=1 XDG_CONFIG_HOME="$tmp/xdg-$name" GHOSTTY_CONFIG_PATH="$tmp/config" \
         "$app/Contents/MacOS/raptor" "-NSWindow Frame Raptor $sid" "80 $((sh - 800)) 1080 720 0 0 $sw $sh" \
         >"$tmp/app-$name.log" 2>&1 &
     id=
@@ -145,7 +179,14 @@ shoot() {
     }
     sleep 2.5
     shot=$out/raptor-$name.png
-    screencapture -x -o -l"$id" "$shot"
+    if [ -n "$bp" ]; then
+        screencapture -x -R80,80,1080,720 "$shot"
+        kill "$bp"
+        # sh keeps an assignment made for a function call; the next shot has none.
+        backdrop=
+    else
+        screencapture -x -o -l"$id" "$shot"
+    fi
     # The checks are in 2x pixels; a 1x display's shot is doubled, pixel for pixel.
     if [ "$(magick identify -format %w "$shot")" -lt 2000 ]; then
         magick "$shot" -filter point -resize 200% "$shot"
@@ -246,6 +287,16 @@ if [ -f "$img" ]; then
     within "separator columns" "$cols" 1 2
 fi
 
+# Colour $1 (RRGGBB) under the island sheen: 15% white on dark themes ($2 dark),
+# 10% black on light ones.
+sheen() {
+    for i in 1 3 5; do
+        c=$(printf %d "0x$(echo "$1" | cut -c$i-$((i + 1)))")
+        if [ "$2" = dark ]; then c=$(((c * 85 + 255 * 15 + 50) / 100)); else c=$(((c * 90 + 50) / 100)); fi
+        printf %02X "$c"
+    done
+}
+
 # Islands: cards and the chrome around them.
 islands() {
     img=$1 chrome=$2 card=$3 border=$4
@@ -301,9 +352,61 @@ shoot fresh "" RAPTOR_INTERFACE_STYLE=blended RAPTOR_PANE_DENSITY=islands RAPTOR
 img=$out/raptor-fresh.png
 if [ -f "$img" ]; then
     echo "fresh: $(magick identify -format '%wx%h' "$img") px"
-    # Ghostty's default background #282C34 gives an island border of #3C4049.
-    runs "$img" 700 3C4049 >"$tmp/edges"
+    # The window alone shows the blur over a plain backdrop: the card body is the
+    # chrome's colour, and each card's rim at either edge is the sheen over it.
+    near "card body is the chrome" "$(px "$img" 40 700)" "$(px "$img" 8 700)"
+    runs "$img" 700 "$(sheen "$(px "$img" 40 700)" dark)" >"$tmp/edges"
     within "fresh install has islands" "$(wc -l <"$tmp/edges" | tr -d ' ')" 0 4
+fi
+
+# How much of what's behind the window pixel $3,$4 lets through, in percent:
+# its rise from shot $1 (over black) to shot $2 (over white).
+through() {
+    k=$(px "$1" "$3" "$4")
+    w=$(px "$2" "$3" "$4")
+    awk -v k="$k" -v w="$w" '
+        function h(s) { return (index("0123456789ABCDEF", substr(s, 1, 1)) - 1) * 16 + index("0123456789ABCDEF", substr(s, 2, 1)) - 1 }
+        BEGIN { t = 0; for (i = 1; i <= 5; i += 2) t += h(substr(w, i, 2)) - h(substr(k, i, 2)); printf "%d", t * 100 / 765 + 0.5 }'
+}
+
+# Translucent panes: $1 name, $2 background, $3 dark or light, then settings.
+translucent() {
+    tname=$1 bg=$2 theme=$3
+    shift 3
+    backdrop=000000 shoot "$tname-k" "$bg" "$@"
+    backdrop=FFFFFF shoot "$tname-w" "$bg" "$@"
+    k=$out/raptor-$tname-k.png w=$out/raptor-$tname-w.png
+    [ -f "$k" ] && [ -f "$w" ] || return 0
+    echo "$tname: $(magick identify -format '%wx%h' "$k") px"
+    # The left card's body, low down clear of text, and the gutter between cards.
+    body=$(through "$k" "$w" 600 1300)
+    within "pane body lets through what the chrome does (%)" "$body" 2 "$(through "$k" "$w" 1078 700)"
+    if [ "$body" -ge 20 ]; then echo "ok   pane body lets through $body%"; else
+        echo "FAIL pane body lets through $body%, want at least 20%"
+        fail=1
+    fi
+    # Over black, the rim at the left card's left edge is the sheen over the body.
+    near "island sheen" "$(px "$k" 16 700)" "$(sheen "$(px "$k" 40 700)" "$theme")"
+}
+
+panes="RAPTOR_PANE_DENSITY=islands RAPTOR_PANE_HEADERS=1"
+# shellcheck disable=SC2086
+translucent blended-dark 0A0C10 dark RAPTOR_INTERFACE_STYLE=blended $panes RAPTOR_TRANSLUCENT_PANES=1
+# shellcheck disable=SC2086
+translucent blended-light F8F6FB light RAPTOR_INTERFACE_STYLE=blended $panes RAPTOR_TRANSLUCENT_PANES=1
+# shellcheck disable=SC2086
+translucent glass-dark 0A0C10 dark RAPTOR_INTERFACE_STYLE=glass $panes RAPTOR_TRANSLUCENT_PANES=1
+# shellcheck disable=SC2086
+translucent glass-light F8F6FB light RAPTOR_INTERFACE_STYLE=glass $panes RAPTOR_TRANSLUCENT_PANES=1
+
+# shellcheck disable=SC2086
+backdrop=000000 shoot opaque-k 0A0C10 RAPTOR_INTERFACE_STYLE=blended $panes RAPTOR_TRANSLUCENT_PANES=0
+# shellcheck disable=SC2086
+backdrop=FFFFFF shoot opaque-w 0A0C10 RAPTOR_INTERFACE_STYLE=blended $panes RAPTOR_TRANSLUCENT_PANES=0
+k=$out/raptor-opaque-k.png w=$out/raptor-opaque-w.png
+if [ -f "$k" ] && [ -f "$w" ]; then
+    echo "opaque: $(magick identify -format '%wx%h' "$k") px"
+    within "opaque pane body lets through (%)" "$(through "$k" "$w" 600 1300)" 0 0
 fi
 
 # The command palette, unfiltered, in the 2x screenshot $1.

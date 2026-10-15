@@ -12,6 +12,17 @@ struct RaptorPane: View {
 
     static let islandRadius: CGFloat = 10
 
+    /// How much of the chrome colour covers an unfocused compact header in Blended and
+    /// Glass, where the pane body lets the desktop through as the chrome does.
+    static let unfocusedHeaderOpacity = 0.7
+
+    /// The rim of an island in Blended and Glass: as in Rex, a glassy edge that lifts
+    /// whatever shows through the card (about +35/255 on Rex's dark frames), so it
+    /// takes the desktop's colour rather than a fixed one.
+    static func sheen(light: Bool) -> Color {
+        light ? .black.opacity(0.1) : .white.opacity(0.15)
+    }
+
     var body: some View {
         let islands = appearance.density == .islands
         let tokens = ThemeTokens(background: NSColor(ghostty.config.backgroundColor))
@@ -21,6 +32,11 @@ struct RaptorPane: View {
         let glass = ghostty.config.backgroundBlur.isGlassStyle
         let paneFill = Color(nsColor: NSColor(ghostty.config.backgroundColor))
             .opacity(ghostty.config.backgroundOpacity)
+        // The window's chrome tint stops at the card, so an unfocused compact header
+        // draws the chrome itself (Solid's opaque window already shows it), denser than
+        // the translucent body so it still reads as unfocused.
+        let chromeFill = appearance.effectiveStyle == .solid ? .clear
+            : Color(nsColor: tokens.chrome).opacity(Self.unfocusedHeaderOpacity)
         let focused = controller.focusedPane === surface
         let block = controller.block(of: surface).flatMap { controller.blocks[$0] } ?? .init()
 
@@ -34,19 +50,30 @@ struct RaptorPane: View {
                     close: { controller.close(surface) })
                     .frame(height: islands ? 33 : 34)
                     // Compact headers of unfocused panes show the chrome behind them.
-                    .background(islands || focused ? paneFill : .clear)
+                    .background(islands || focused ? paneFill : chromeFill)
             }
             content
                 .background(glass ? paneFill : .clear)
         }
         .clipShape(RoundedRectangle(cornerRadius: islands ? Self.islandRadius : 0))
+        .anchorPreference(key: RaptorPaneFrames.self, value: .bounds) { [$0] }
         .overlay {
             if islands {
                 RoundedRectangle(cornerRadius: Self.islandRadius)
-                    .strokeBorder(Color(nsColor: tokens.islandBorder), lineWidth: 1)
+                    .strokeBorder(appearance.effectiveStyle == .solid ? Color(nsColor: tokens.islandBorder)
+                        : Self.sheen(light: tokens.isLight), lineWidth: 1)
                     .allowsHitTesting(false)
             }
         }
+    }
+}
+
+/// The panes' cards, for the window background to leave untinted.
+struct RaptorPaneFrames: PreferenceKey {
+    static let defaultValue: [Anchor<CGRect>] = []
+
+    static func reduce(value: inout [Anchor<CGRect>], nextValue: () -> [Anchor<CGRect>]) {
+        value.append(contentsOf: nextValue())
     }
 }
 

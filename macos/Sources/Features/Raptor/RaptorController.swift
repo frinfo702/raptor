@@ -128,12 +128,12 @@ class RaptorController: BaseTerminalController {
         window.appearance = NSAppearance(named: tokens.isLight ? .aqua : .darkAqua)
         window.isOpaque = solid
         window.backgroundColor = solid ? tokens.chrome : .clear
-        // Glass is tinted like Blended's blur, whatever background-opacity the user's
-        // config sets for the panes.
+        // The glass itself is untinted, whatever background-opacity says: the window
+        // background tints the chrome around the panes as it does Blended's blur.
         terminalViewContainer?.ghosttyConfigDidChange(
             ghostty.config,
             preferredBackgroundColor: tokens.chrome,
-            glassTint: RaptorWindowBackground.tint)
+            glassTint: 0)
     }
 
     required init?(coder: NSCoder) {
