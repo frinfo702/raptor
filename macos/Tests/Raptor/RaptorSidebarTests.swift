@@ -32,7 +32,7 @@ struct RaptorSidebarTests {
             switch row {
             case .session(let id, _, _): "#" + id
             case .tab(let t, let branch): String(repeating: "  ", count: branch.depth) + t.id
-            case .more(_, let branch): String(repeating: "  ", count: branch.depth) + "…"
+            case .more(_, _, let branch): String(repeating: "  ", count: branch.depth) + "…"
             }
         }
     }
@@ -168,8 +168,14 @@ struct RaptorSidebarTests {
         let rows = Model.rows(sessions, activity: false)
         // Everything under subsub is hidden behind one "…" whose elbow ends at that row.
         #expect(outline(rows) == ["#a", "lead", "  sub", "    subsub", "      …"])
-        #expect(rows.last == .more(
-            id: "subsub", Model.Branch(guides: [false, false], last: true, isChild: true)))
+        guard case .more(let id, let hidden, let branch) = rows.last else {
+            Issue.record("expected a trailing … row")
+            return
+        }
+        #expect(id == "subsub")
+        #expect(branch == Model.Branch(guides: [false, false], last: true, isChild: true))
+        // The … row knows every tab it hides, so it can stand in for the active one.
+        #expect(hidden.map(\.id) == ["deep", "deeper", "deep2"])
         #expect(Set(rows.map(\.id)).count == rows.count)
     }
 

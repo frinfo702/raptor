@@ -144,14 +144,14 @@ final class RaptorSidebarModel: ObservableObject {
         case session(id: String, label: String, first: Bool)
         case tab(Tab, Branch)
         /// "…": the tabs nested under the tab with this id are deeper than the
-        /// sidebar shows, so one row stands in for all of them.
-        case more(id: String, Branch)
+        /// sidebar shows, so one row stands in for all of them, `hidden`.
+        case more(id: String, hidden: [Tab], Branch)
 
         var id: String {
             switch self {
             case .session(let id, _, _): id
             case .tab(let t, _): t.id
-            case .more(let id, _): "more:" + id
+            case .more(let id, _, _): "more:" + id
             }
         }
     }
@@ -232,7 +232,14 @@ final class RaptorSidebarModel: ObservableObject {
             // The kids would sit deeper than the sidebar shows: one "…" row stands
             // for the whole subtree, connected as its first kid would be.
             if branch.depth >= Self.maxDepth, !kids.isEmpty {
-                rows.append(.more(id: t.id, Branch(guides: guides, last: true, isChild: true)))
+                var hidden: [Tab] = []
+                func hide(_ t: Tab) {
+                    guard placed.insert(t.id).inserted else { return }
+                    hidden.append(t)
+                    for kid in children[t.id] ?? [] { hide(kid) }
+                }
+                kids.forEach(hide)
+                rows.append(.more(id: t.id, hidden: hidden, Branch(guides: guides, last: true, isChild: true)))
                 return
             }
             for (i, kid) in kids.enumerated() {
@@ -307,9 +314,16 @@ struct RaptorSidebar: View {
                                 controller.show(tab: tab.id, in: tab.session)
                             }
                             .transition(.opacity)
-                        case .more(_, let branch):
-                            RaptorSidebarMore(branch: branch, activity: appearance.activity)
-                                .transition(.opacity)
+                        case .more(_, let hidden, let branch):
+                            RaptorSidebarMore(
+                                branch: branch,
+                                selected: hidden.contains {
+                                    $0.session == controller.session && $0.id == controller.activeTab
+                                },
+                                activity: appearance.activity,
+                                tokens: tokens
+                            )
+                            .transition(.opacity)
                         }
                     }
                 }
@@ -502,13 +516,7 @@ struct RaptorSidebarRow: View {
         .padding(.leading, 10 + CGFloat(branch.depth) * RaptorSidebar.indent)
         .padding(.trailing, 14)
         .frame(maxWidth: .infinity, minHeight: height - 3, maxHeight: height - 3, alignment: .leading)
-        .background {
-            if selected {
-                let shape = RoundedRectangle(cornerRadius: activity ? 15 : (height - 3) / 2, style: .continuous)
-                shape.fill(Self.raised(tokens))
-                    .overlay(shape.strokeBorder(Self.raisedBorder(tokens), lineWidth: 1))
-            }
-        }
+        .background { Self.pill(selected: selected, height: height, activity: activity, tokens: tokens) }
         .contentShape(Rectangle())
         .padding(.horizontal, RaptorSidebar.selectionInset)
         .frame(height: height)
@@ -523,6 +531,15 @@ struct RaptorSidebarRow: View {
         .accessibilityAction(.default, select)
     }
 
+    @ViewBuilder
+    static func pill(selected: Bool, height: CGFloat, activity: Bool, tokens: ThemeTokens) -> some View {
+        if selected {
+            let shape = RoundedRectangle(cornerRadius: activity ? 15 : (height - 3) / 2, style: .continuous)
+            shape.fill(raised(tokens))
+                .overlay(shape.strokeBorder(raisedBorder(tokens), lineWidth: 1))
+        }
+    }
+
     private var accessibilityLabel: String {
         var label = tab.tab.title
         if tab.isWorking || activity { label += ", " + RaptorSidebarModel.statusLine(tab.status) }
@@ -531,10 +548,13 @@ struct RaptorSidebarRow: View {
 }
 
 /// The "…" row that stands in for tabs nested deeper than the sidebar shows, drawn
-/// like a tab row and hanging from its parent's connector.
+/// like a tab row and hanging from its parent's connector. It wears the selection
+/// pill while the active tab is one of those it hides.
 struct RaptorSidebarMore: View {
     let branch: RaptorSidebarModel.Branch
+    let selected: Bool
     let activity: Bool
+    let tokens: ThemeTokens
 
     var body: some View {
         let height = activity ? RaptorSidebar.activityRowHeight : RaptorSidebar.rowHeight
@@ -545,6 +565,9 @@ struct RaptorSidebarMore: View {
             .padding(.leading, 10 + CGFloat(branch.depth) * RaptorSidebar.indent)
             .padding(.trailing, 14)
             .frame(maxWidth: .infinity, minHeight: height - 3, maxHeight: height - 3, alignment: .leading)
+            .background {
+                RaptorSidebarRow.pill(selected: selected, height: height, activity: activity, tokens: tokens)
+            }
             .padding(.horizontal, RaptorSidebar.selectionInset)
             .frame(height: height)
             .background(alignment: .leading) {
@@ -553,6 +576,7 @@ struct RaptorSidebarMore: View {
             }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("More tabs, nested deeper than the sidebar shows")
+            .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
