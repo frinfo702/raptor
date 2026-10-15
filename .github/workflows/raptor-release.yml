@@ -134,6 +134,12 @@ jobs:
               --notes "Sparkle appcast for Raptor's updater. Do not delete." --repo "$GITHUB_REPOSITORY"
           gh release upload raptor-appcast appcast.xml --clobber --repo "$GITHUB_REPOSITORY"
 
+      # Sparkle fetches the feed and the DMG with no GitHub credentials, so
+      # a private repository (or a deleted asset) leaves installed apps with
+      # "Update Error!" even though every upload above succeeds.
+      - name: Check the feed without credentials
+        run: .release-tools/dist/macos/raptor-feed-check.sh zig-out/Raptor.app
+
       - name: Append install notes
         run: |
           marker="<!-- raptor-dmg-notes -->"
