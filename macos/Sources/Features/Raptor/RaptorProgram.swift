@@ -36,9 +36,15 @@ struct RaptorProgram: Equatable {
     static let cards: [String: String] = [
         "claude": "claudecode",
         "codex": "codex",
+        "cursor-agent": "cursor",
+        "docker": "docker",
         "gh": "github",
         "git": "git",
+        "node": "node",
         "opencode": "opencode",
+        "uv": "uv",
+        "uvx": "uv",
+        "vim": "vim",
     ]
 
     /// The imageset that draws a card on a light or dark theme; a card with one image
@@ -68,15 +74,15 @@ struct RaptorProgram: Equatable {
         "claude": .init(name: "Claude", icon: .symbol("asterisk"), tile: rgb(0xD9774B), glyph: rgb(0xFFFFFF), isAgent: true),
         "codex": .init(name: "Codex", icon: .symbol("circle.hexagongrid"), tile: rgb(0xF2F2F2), glyph: rgb(0x111111), isAgent: true),
         "opencode": .init(name: "OpenCode", icon: .symbol("sparkle"), tile: rgb(0x2A2A2A), glyph: rgb(0xEDEDED), isAgent: true),
+        "cursor-agent": .init(name: "Cursor", icon: .symbol("cursorarrow"), tile: rgb(0x111111), glyph: rgb(0xEDEDED), isAgent: true),
         "gemini": .init(name: "Gemini", icon: .symbol("sparkle"), tile: rgb(0x2F4F7A), glyph: rgb(0xBFD8F5), isAgent: true),
     ]
 
-    /// The name a process goes by: its command name, unless only the name it was run as
-    /// (argv[0], without a login shell's "-") is one Raptor knows. Claude Code's binary is
-    /// named for its version ("2.1.299") but run as "claude".
+    /// The name a process goes by: the name it was run as (argv[0], without a login shell's
+    /// "-") if Raptor knows it, else its command name. Claude Code's binary is named for its
+    /// version ("2.1.299") but run as "claude"; Cursor's agent is node run as "cursor-agent".
     static func processName(_ name: String?, argv0: String?) -> String? {
         let known = { (n: String) in shells.contains(n) || Self.known[n] != nil || cards[n] != nil }
-        if let name, known(name) { return name }
         guard let argv0 else { return name }
         let runAs = String((argv0 as NSString).lastPathComponent.drop { $0 == "-" })
         return known(runAs) ? runAs : name

@@ -23,7 +23,7 @@ struct RaptorCardTests {
     }
 
     @Test func unknownProgramsKeepTheTile() {
-        #expect(card("vim") == nil)
+        #expect(card("nvim") == nil)
         #expect(card("make") == nil)
         #expect(card("lazygit") == nil)
     }
@@ -67,16 +67,19 @@ struct RaptorCardStackTests {
 
     @Test func atMostTwoCardsBehind() {
         #expect(cards("zsh", ["claude", "codex", "git", "zsh"]) == ["shell", "claudecode", "codex"])
-        #expect(cards("vim", []) == [nil])
+        #expect(cards("make", []) == [nil])
     }
 
-    /// Claude Code's binary is named for its version; it runs as "claude".
+    /// A process goes by the name it runs as when Raptor knows it: Claude Code's version-named
+    /// binary runs as "claude", Cursor's node-based agent as "cursor-agent".
     @Test func versionedBinariesGoByTheNameTheyRunAs() {
         #expect(RaptorProgram.processName("2.1.299", argv0: "claude") == "claude")
         #expect(RaptorProgram.processName("2.1.299", argv0: "/Users/me/.local/bin/claude") == "claude")
         #expect(RaptorProgram.processName("zsh", argv0: "-zsh") == "zsh")
         #expect(RaptorProgram.processName("make", argv0: "make") == "make")
-        #expect(RaptorProgram.processName("node", argv0: "claude") == "node")
+        #expect(RaptorProgram.processName("node", argv0: "cursor-agent") == "cursor-agent")
+        #expect(RaptorProgram.processName("node", argv0: "/Users/me/.local/bin/node") == "node")
+        #expect(RaptorProgram.processName("node", argv0: "script.js") == "node")
         #expect(RaptorProgram.processName("2.1.299", argv0: nil) == "2.1.299")
         #expect(RaptorProgram.processName(nil, argv0: nil) == nil)
     }
