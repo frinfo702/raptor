@@ -416,6 +416,21 @@ class RaptorController: BaseTerminalController {
         return nil
     }
 
+    /// A pane dropped on another moves on the server, whose next view shows it here;
+    /// moving only the local tree would last until that view.
+    override func performSplitAction(_ action: TerminalSplitOperation) {
+        guard case .drop(let drop) = action else { return super.performSplitAction(action) }
+        // Panes of another window are other surfaces, so they are not ours to move.
+        guard let moved = block(of: drop.payload), let target = block(of: drop.destination) else { return }
+        let direction = switch drop.zone {
+        case .top: "up"
+        case .bottom: "down"
+        case .left: "left"
+        case .right: "right"
+        }
+        client.call("session.move_block", ["session": session, "block": moved, "target": target, "direction": direction])
+    }
+
     private struct BlockProcess: Decodable {
         struct Foreground: Decodable {
             let pid: Int

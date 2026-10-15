@@ -1540,6 +1540,7 @@ const methods = std.StaticStringMap(Handler).initComptime(.{
     .{ "session.subscribe", &sessionSubscribe },
     .{ "session.new_window", &sessionNewWindow },
     .{ "session.new_split", &sessionNewSplit },
+    .{ "session.move_block", &sessionMoveBlock },
     .{ "session.close_window", &sessionCloseWindow },
     .{ "session.zoom_block", &sessionZoomBlock },
     .{ "session.focus", &sessionFocus },
@@ -1953,6 +1954,34 @@ fn sessionNewSplit(self: *Server, req: *Request, w: *Stringify) Error!void {
     try w.write(.{ .block = prefixed("block", &pane.id) });
 }
 
+/// Move a block beside another of its window, as a pane dropped on
+/// another pane's edge.
+fn sessionMoveBlock(self: *Server, req: *Request, w: *Stringify) Error!void {
+    const t = try self.resolve(req);
+    const q = req.str("target") orelse return req.fail(error.Usage, "target is required", .{});
+    const target = try match(Pane, "block", try t.window.tree.leaves(req.arena), q, req);
+    if (target == t.pane) return req.fail(error.Usage, "a block can't move beside itself", .{});
+    const d = req.str("direction") orelse return req.fail(error.Usage, "direction is required", .{});
+    const dir: layout.Dir, const before = if (std.mem.eql(u8, d, "left"))
+        .{ .horizontal, true }
+    else if (std.mem.eql(u8, d, "right"))
+        .{ .horizontal, false }
+    else if (std.mem.eql(u8, d, "up"))
+        .{ .vertical, true }
+    else if (std.mem.eql(u8, d, "down"))
+        .{ .vertical, false }
+    else
+        return req.fail(error.Usage, "direction must be left, right, up, or down", .{});
+    t.window.tree.move(self.alloc, t.pane, target, dir, before) catch |err| return switch (err) {
+        error.NotFound => unreachable,
+        error.OutOfMemory => error.OutOfMemory,
+    };
+    t.window.focused = t.pane;
+    t.window.zoomed = null;
+    self.viewChanged(t.session);
+    try w.write(.{});
+}
+
 fn sessionCloseWindow(self: *Server, req: *Request, w: *Stringify) Error!void {
     self.closeWindow((try self.resolve(req)).window);
     try w.write(.{});
@@ -2283,6 +2312,33 @@ test "rex Server: sessions over the socket" {
     defer alloc.free(view);
     try testing.expect(std.mem.indexOf(u8, view, "\"type\":\"vertical\"") != null);
     try testing.expect(std.mem.indexOf(u8, view, "\"revision\":2") != null);
+
+    // Moving the first block below the second puts the second on top, and
+    // the view shows it rather than the old layout.
+    const split_parsed = try std.json.parseFromSlice(std.json.Value, alloc, split, .{});
+    defer split_parsed.deinit();
+    const second = split_parsed.value.object.get("result").?.object.get("block").?.string;
+    const move_req = try std.fmt.allocPrint(alloc,
+        \\{{"id":53,"method":"session.move_block","params":{{"session":"demo","block":"1","target":"{s}","direction":"down"}}}}
+    , .{second});
+    defer alloc.free(move_req);
+    const moved = try T.call(fd, move_req);
+    defer alloc.free(moved);
+    try testing.expectEqualStrings("{\"id\":53,\"result\":[]}", moved);
+    const moved_view = try T.call(fd,
+        \\{"id":54,"method":"session.view","params":{"session":"demo"}}
+    );
+    defer alloc.free(moved_view);
+    const top = try std.fmt.allocPrint(alloc, "\"layout\":{{\"type\":\"vertical\",\"ratio\":0.5,\"a\":{{\"type\":\"block\",\"block\":\"{s}\"}}", .{second});
+    defer alloc.free(top);
+    try testing.expect(std.mem.indexOf(u8, moved_view, top) != null);
+    const beside_itself = try std.fmt.allocPrint(alloc,
+        \\{{"id":55,"method":"session.move_block","params":{{"session":"demo","block":"{s}","target":"{s}","direction":"up"}}}}
+    , .{ second, second });
+    defer alloc.free(beside_itself);
+    const refused = try T.call(fd, beside_itself);
+    defer alloc.free(refused);
+    try testing.expect(std.mem.indexOf(u8, refused, "\"error\"") != null);
 
     // Block positions count within the active window only.
     const window = try T.call(fd,
