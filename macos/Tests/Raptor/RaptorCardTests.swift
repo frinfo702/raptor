@@ -46,6 +46,19 @@ struct RaptorCardTests {
         #expect(RaptorProgram.cardAsset("claudecode", light: true) == "claudecode")
         #expect(RaptorProgram.cardAsset("claudecode", light: false) == "claudecode")
     }
+
+    @Test func logosHaveArtForBothThemes() {
+        let processes = ["claude", "codex", "opencode", "cursor-agent", "copilot", "gh", "nvim", "vim", "node",
+                         "python", "python3", "docker", "bash", "fish", "kubectl", "k9s", "aws", "cloudflared"]
+        for process in processes {
+            guard case .logo(let name) = RaptorProgram.identify(process)?.icon else {
+                Issue.record("\(process) has no logo")
+                continue
+            }
+            #expect(NSImage(named: "logo-\(name)-light") != nil, "\(name)")
+            #expect(NSImage(named: "logo-\(name)-dark") != nil, "\(name)")
+        }
+    }
 }
 
 /// A tab stacks the other panes' cards behind the focused pane's, as in Rex.
