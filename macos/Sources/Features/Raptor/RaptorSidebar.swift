@@ -14,6 +14,8 @@ final class RaptorSidebarModel: ObservableObject {
         /// The block whose program made this tab.
         let parent: String?
         let blocks: [String]
+        /// The git checkout the focused pane is in.
+        var checkout: RaptorGitCheckout?
 
         var id: String { tab.id }
         var isWorking: Bool { status?.state == "working" }
@@ -32,6 +34,10 @@ final class RaptorSidebarModel: ObservableObject {
     private var views: [(id: String, view: RaptorController.SessionView)] = []
     private var blocks: [String: RaptorController.Block] = [:]
     private var statuses: [String: RaptorController.SessionView.Status] = [:]
+    // ponytail: never forgotten, so a directory that becomes a repo or worktree after it
+    // was first seen is noticed only on the next launch.
+    /// Checkouts by directory, nil where there is none.
+    private var checkouts: [String: RaptorGitCheckout?] = [:]
     private var reloadPending = false
 
     init(client: RaptorClient) {
@@ -117,10 +123,19 @@ final class RaptorSidebarModel: ObservableObject {
                     status: status,
                     hasAgent: ids.contains { blocks[$0]?.program.isAgent == true },
                     parent: w.parent,
-                    blocks: ids)
+                    blocks: ids,
+                    checkout: checkout(blocks[w.focused_block]?.pwd ?? ""))
             })
         }
         if sessions != self.sessions { self.sessions = sessions }
+    }
+
+    private func checkout(_ dir: String) -> RaptorGitCheckout? {
+        guard !dir.isEmpty else { return nil }
+        if let known = checkouts[dir] { return known }
+        let found = RaptorGitCheckout.resolve(dir)
+        checkouts[dir] = found
+        return found
     }
 
     // MARK: Rows
@@ -150,19 +165,48 @@ final class RaptorSidebarModel: ObservableObject {
         var depth: Int { guides.count + (isChild ? 1 : 0) }
     }
 
-    /// The sidebar's rows below the host: each session's header and its tabs, with a
-    /// tab that another tab's program made (an agent starting another in a new tab or
-    /// session with `rap run` or `rap new`) nested under that tab, wherever it lives.
+    /// The sidebar's rows below the host: each session's header and its tabs, a tab
+    /// nested under its parent tab wherever that lives. A tab's parent is, first, the
+    /// tab whose program made it (an agent starting another with `rap run` or `rap new`,
+    /// as in Rex); else, for a tab in a linked git worktree, the first tab in its main
+    /// checkout of the same repository (as herdr groups worktrees). So an agent's own
+    /// tabs stay with it even when they work in a worktree, and a worktree tab nobody
+    /// made from a tab joins its repository's checkout. A tab whose parents would lead
+    /// back to itself stays at the top.
+    ///
     /// Activity Mode keeps only tabs with an agent or a status; a session left with none
-    /// goes, and a kept tab whose parent went moves up to its own session.
+    /// goes, and a kept tab whose parent went falls back to the next rule, or the top.
     static func rows(_ sessions: [Session], activity: Bool) -> [Row] {
         let shown = sessions.map { s in
             (s, s.tabs.filter { !activity || $0.status != nil || $0.hasAgent })
         }
         var owner: [String: String] = [:]
-        for (_, tabs) in shown { for t in tabs { for b in t.blocks { owner[b] = t.id } } }
+        var mainCheckout: [String: String] = [:]
+        for (_, tabs) in shown {
+            for t in tabs {
+                for b in t.blocks { owner[b] = t.id }
+                if let c = t.checkout, !c.isLinked, mainCheckout[c.commonDir] == nil { mainCheckout[c.commonDir] = t.id }
+            }
+        }
+        var links: [String: String] = [:]
+        for (_, tabs) in shown {
+            for t in tabs {
+                if let p = t.parent.flatMap({ owner[$0] }), p != t.id {
+                    links[t.id] = p
+                } else if let c = t.checkout, c.isLinked, let m = mainCheckout[c.commonDir], m != t.id {
+                    links[t.id] = m
+                }
+            }
+        }
         func parent(_ t: Tab) -> String? {
-            t.parent.flatMap { owner[$0] }.flatMap { $0 == t.id ? nil : $0 }
+            guard let first = links[t.id] else { return nil }
+            var seen: Set<String> = []
+            var next: String? = first
+            while let n = next, seen.insert(n).inserted {
+                if n == t.id { return nil }
+                next = links[n]
+            }
+            return first
         }
         var children: [String: [Tab]] = [:]
         for (_, tabs) in shown { for t in tabs { if let p = parent(t) { children[p, default: []].append(t) } } }
@@ -181,7 +225,6 @@ final class RaptorSidebarModel: ObservableObject {
             }
         }
         for (s, tabs) in shown {
-            // A tab whose parent chain loops back on itself has no root to hang from.
             let roots = tabs.filter { parent($0) == nil }
             guard !roots.isEmpty else { continue }
             rows.append(.session(id: s.id, label: s.label, first: rows.isEmpty))
@@ -541,5 +584,47 @@ extension View {
                 LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
                     .frame(width: 24)
             })
+    }
+}
+
+/// Where a directory sits in git: the repository's common directory, shared by its main
+/// checkout and every linked worktree, and whether this is a linked worktree. Read the
+/// way git finds them, from `.git` and the files it points to, without running git.
+struct RaptorGitCheckout: Equatable {
+    let commonDir: String
+    let isLinked: Bool
+
+    /// The checkout holding `dir`, nil outside any.
+    static func resolve(_ dir: String, fileManager fm: FileManager = .default) -> RaptorGitCheckout? {
+        var url = URL(fileURLWithPath: dir).standardizedFileURL
+        while true {
+            let dotGit = url.appendingPathComponent(".git")
+            var isDir: ObjCBool = false
+            if fm.fileExists(atPath: dotGit.path, isDirectory: &isDir) {
+                if isDir.boolValue { return .init(commonDir: canonical(dotGit), isLinked: false) }
+                // A worktree's or submodule's .git file: "gitdir: <path>".
+                guard let text = try? String(contentsOf: dotGit, encoding: .utf8),
+                      let line = text.split(separator: "\n").first, line.hasPrefix("gitdir:") else { return nil }
+                let gitDir = path(line.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespaces), in: url)
+                // A linked worktree's git dir names the common one in "commondir".
+                let common = (try? String(contentsOf: gitDir.appendingPathComponent("commondir"), encoding: .utf8))
+                    .map { path($0.trimmingCharacters(in: .whitespacesAndNewlines), in: gitDir) }
+                    ?? gitDir
+                let commonDir = canonical(common), own = canonical(gitDir)
+                return .init(commonDir: commonDir, isLinked: commonDir != own)
+            }
+            let up = url.deletingLastPathComponent()
+            if up.path == url.path { return nil }
+            url = up
+        }
+    }
+
+    /// `p` as git reads it: absolute, or relative to the directory `base`.
+    private static func path(_ p: String, in base: URL) -> URL {
+        (p.hasPrefix("/") ? URL(fileURLWithPath: p) : base.appendingPathComponent(p)).standardizedFileURL
+    }
+
+    private static func canonical(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
     }
 }
