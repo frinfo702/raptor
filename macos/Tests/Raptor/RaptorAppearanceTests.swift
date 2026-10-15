@@ -103,6 +103,8 @@ struct RaptorProgramTests {
         #expect(RaptorProgram.title(process: nil, terminalTitle: "", pwd: "/x", home: home) == "shell")
         #expect(RaptorProgram.title(process: nil, terminalTitle: "vim foo", pwd: "/x", home: home) == "vim foo")
         #expect(RaptorProgram.identify("cargo")?.name == "cargo")
-        #expect(RaptorProgram.identify("bash")?.icon == RaptorProgram.shell.icon)
+        // Shells with a logo of their own show it; the rest keep the shell glyph.
+        #expect(RaptorProgram.identify("zsh")?.icon == RaptorProgram.shell.icon)
+        #expect(RaptorProgram.identify("bash")?.icon == .logo("bash"))
     }
 }
