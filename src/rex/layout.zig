@@ -87,6 +87,21 @@ pub fn Tree(comptime Leaf: type) type {
             if (s.b.* == .split) removeFrom(alloc, s.b, leaf);
         }
 
+        /// Move `leaf` beside `target`, splitting the target's space in two
+        /// with `leaf` first if `before`, else second.
+        pub fn move(self: *Self, alloc: Allocator, leaf: Leaf, target: Leaf, dir: Dir, before: bool) !void {
+            if (leaf == target or !self.contains(leaf) or !self.contains(target)) return error.NotFound;
+            const a = try alloc.create(Node);
+            errdefer alloc.destroy(a);
+            const b = try alloc.create(Node);
+            // Removing can move the target's node, so find it afterwards.
+            self.remove(alloc, leaf);
+            const node = find(self.root, target).?;
+            a.* = node.*;
+            b.* = .{ .leaf = leaf };
+            node.* = .{ .split = .{ .dir = dir, .a = if (before) b else a, .b = if (before) a else b } };
+        }
+
         /// The top-left leaf.
         pub fn first(self: Self) Leaf {
             var node = self.root;
@@ -182,6 +197,21 @@ test "rex layout: split, remove, and order" {
     try testing.expectEqualStrings(
         \\{"type":"horizontal","ratio":0.5,"a":{"type":"vertical","ratio":0.5,"a":{"type":"block","block":1},"b":{"type":"block","block":3}},"b":{"type":"block","block":2}}
     , out.written());
+
+    // Moving a leaf takes it out and splits the target's space with it.
+    try t.move(alloc, 1, 2, .vertical, true);
+    try testing.expect(t.root.* == .split and t.root.split.dir == .horizontal);
+    const moved = t.root.split.b;
+    try testing.expect(moved.* == .split and moved.split.dir == .vertical);
+    try testing.expectEqual(1, moved.split.a.leaf);
+    try testing.expectEqual(2, moved.split.b.leaf);
+    try t.move(alloc, 3, 1, .horizontal, false);
+    try testing.expect(t.root.* == .split and t.root.split.dir == .vertical);
+    try testing.expectEqual(2, t.root.split.b.leaf);
+    try testing.expectEqual(3, t.root.split.a.split.b.leaf);
+    try testing.expectError(error.NotFound, t.move(alloc, 1, 1, .vertical, false));
+    try testing.expectError(error.NotFound, t.move(alloc, 9, 1, .vertical, false));
+    try testing.expectEqual(3, t.count());
 
     // Removing a leaf gives its space to its sibling.
     t.remove(alloc, 3);
