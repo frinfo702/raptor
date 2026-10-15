@@ -78,15 +78,7 @@ struct RaptorTabView: View {
             (Text(parts.name).foregroundColor(active ? .primary : .secondary)
                 + Text(parts.path).foregroundColor(active ? .secondary : Color(nsColor: .tertiaryLabelColor)))
                 .font(.system(size: 13, weight: .medium))
-                .lineLimit(1)
-                .fixedSize()
-                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
-                .clipped()
-                .mask(HStack(spacing: 0) {
-                    Rectangle()
-                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
-                        .frame(width: 24)
-                })
+                .fadeTruncated()
             if hovering {
                 Button(action: close) {
                     Image(systemName: "xmark")

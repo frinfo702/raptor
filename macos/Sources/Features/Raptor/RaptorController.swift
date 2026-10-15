@@ -152,6 +152,8 @@ class RaptorController: BaseTerminalController {
             let label: String?
             let focused_block: String
             let zoomed: String?
+            /// The block whose program made this window, if one did.
+            let parent: String?
             let layout: Layout
             let blocks: [Block]
         }
@@ -160,6 +162,15 @@ class RaptorController: BaseTerminalController {
             let id: String
             let title: String
             let pwd: String?
+            /// What the block's program last said it is doing.
+            let status: Status?
+        }
+
+        struct Status: Decodable, Equatable {
+            let state: String
+            let msg: String?
+            /// Wall-clock milliseconds.
+            let updated_at: Int64
         }
     }
 
@@ -199,7 +210,7 @@ class RaptorController: BaseTerminalController {
                 var block = blocks[b.id] ?? Block()
                 block.title = b.title
                 block.pwd = Self.path(b.pwd ?? "")
-                if block.process == nil { block.process = foregroundName(b.id) }
+                if block.process == nil { block.process = client.foregroundName(b.id) }
                 if blocks[b.id] != block { blocks[b.id] = block }
             }
             let root = node(w.layout, seen: &seen)
@@ -289,15 +300,18 @@ class RaptorController: BaseTerminalController {
 
     private func updateTabs() {
         guard let view else { return }
-        tabs = view.windows.map { w in
-            let focused = blocks[w.focused_block] ?? Block()
-            let others = w.blocks.filter { $0.id != w.focused_block }.map { (blocks[$0.id] ?? Block()).program }
-            return Tab(
-                id: w.id,
-                title: RaptorTabView.isDefaultLabel(w.label, window: w.id) ? focused.headerTitle : w.label ?? "",
-                program: focused.program,
-                others: others)
-        }
+        tabs = view.windows.map { Self.tab($0, blocks: blocks) }
+    }
+
+    /// A window as a tab: named for its focused pane unless it was renamed.
+    static func tab(_ w: SessionView.Window, blocks: [String: Block]) -> Tab {
+        let focused = blocks[w.focused_block] ?? Block()
+        let others = w.blocks.filter { $0.id != w.focused_block }.map { (blocks[$0.id] ?? Block()).program }
+        return Tab(
+            id: w.id,
+            title: RaptorTabView.isDefaultLabel(w.label, window: w.id) ? focused.headerTitle : w.label ?? "",
+            program: focused.program,
+            others: others)
     }
 
     /// The block shown by a surface.
@@ -328,9 +342,14 @@ class RaptorController: BaseTerminalController {
         updateTabs()
     }
 
-    /// Shells report their directory as a file URL (OSC 7); headers show its path.
-    private static func path(_ pwd: String) -> String {
-        pwd.hasPrefix("file://") ? URL(string: pwd)?.path ?? pwd : pwd
+    /// Shells report their directory as a URL (OSC 7): file://host/path, or zsh's and
+    /// fish's kitty-shell-cwd://host/path. Headers show its path.
+    static func path(_ pwd: String) -> String {
+        guard let scheme = pwd.range(of: "://"),
+              let slash = pwd[scheme.upperBound...].firstIndex(of: "/") else { return pwd }
+        let path = String(pwd[slash...])
+        // file URLs are percent-encoded; kitty-shell-cwd ones are sent raw.
+        return pwd.hasPrefix("file://") ? path.removingPercentEncoding ?? path : path
     }
 
     override func focusedSurfaceDidChange(to: Ghostty.SurfaceView?) {
@@ -384,6 +403,12 @@ class RaptorController: BaseTerminalController {
         client.call("session.focus", ["session": session, "window": id])
     }
 
+    /// Show a tab of any session, as a sidebar row does.
+    func show(tab id: String, in session: String) {
+        switchSession(to: session)
+        selectTab(id)
+    }
+
     func closeTab(_ id: String) {
         guard let w = view?.windows.first(where: { $0.id == id }) else { return }
         confirmKill(w.blocks.map(\.id), messageText: "Close Tab?") { [weak self] in
@@ -431,26 +456,10 @@ class RaptorController: BaseTerminalController {
         client.call("session.move_block", ["session": session, "block": moved, "target": target, "direction": direction])
     }
 
-    private struct BlockProcess: Decodable {
-        struct Foreground: Decodable {
-            let pid: Int
-            let name: String?
-            let argv0: String?
-        }
-        let pid: Int
-        let foreground: Foreground?
-    }
-
-    /// The name of the block's foreground program, asked of the server.
-    private func foregroundName(_ block: String) -> String? {
-        let p: BlockProcess? = client.call("block.method", ["block": block, "method": "process"])
-        return RaptorProgram.processName(p?.foreground?.name, argv0: p?.foreground?.argv0)
-    }
-
     // ponytail: reads the process name locally, which holds while the server is on this Mac.
     /// True if the block's foreground program is something other than a shell.
     private func isBusy(_ block: String) -> Bool {
-        guard let p: BlockProcess = client.call("block.method", ["block": block, "method": "process"]) else { return false }
+        guard let p: RaptorClient.BlockProcess = client.call("block.method", ["block": block, "method": "process"]) else { return false }
         var name = [CChar](repeating: 0, count: 256)
         // proc_name fails (EPERM) for setuid programs such as top or sudo; shells are never setuid.
         guard proc_name(Int32(p.foreground?.pid ?? p.pid), &name, UInt32(name.count)) > 0 else { return true }
@@ -572,6 +581,19 @@ class RaptorController: BaseTerminalController {
     @IBAction func nextSession(_ sender: Any?) { cycleSession(by: 1) }
     @IBAction func refreshSessions(_ sender: Any?) { refreshSessions() }
     @IBAction func closeSession(_ sender: Any?) { closeSession() }
+    @IBAction func toggleSidebar(_ sender: Any?) { RaptorAppearance.shared.sidebar.toggle() }
+    @IBAction func toggleActivity(_ sender: Any?) { Self.toggleActivity() }
+
+    /// Activity Mode's filter. A hidden sidebar comes back showing activity.
+    static func toggleActivity() {
+        let appearance = RaptorAppearance.shared
+        guard appearance.sidebar else {
+            appearance.activity = true
+            appearance.sidebar = true
+            return
+        }
+        withAnimation(RaptorSidebar.spring) { appearance.activity.toggle() }
+    }
 
     // MARK: Keys
 
@@ -647,6 +669,12 @@ class RaptorController: BaseTerminalController {
             RaptorCommand(title: "Next Session") { [weak self] in self?.cycleSession(by: 1) },
             RaptorCommand(title: "Refresh Sessions", shortcut: ["⌘", "R"]) { [weak self] in self?.refreshSessions() },
             RaptorCommand(title: "Close Session…") { [weak self] in self?.closeSession() },
+            RaptorCommand(title: appearance.sidebar ? "Hide Sidebar" : "Show Sidebar", shortcut: ["⌃", "⌘", "S"]) {
+                appearance.sidebar.toggle()
+            },
+            RaptorCommand(title: appearance.activity ? "Hide Activity" : "Show Activity", shortcut: ["⇧", "⌘", "A"]) {
+                Self.toggleActivity()
+            },
             command("Split Pane Right", "new_split:right"),
             command("Split Pane Down", "new_split:down"),
             command("Split Pane Best Fit", "new_split:auto"),
@@ -720,6 +748,9 @@ extension RaptorController {
         add("Refresh Sessions", #selector(refreshSessions(_:)), "r")
         menu.addItem(.separator())
         add("Close Session…", #selector(closeSession(_:)))
+        menu.addItem(.separator())
+        add("Toggle Sidebar", #selector(toggleSidebar(_:)), "s", [.command, .control])
+        add("Show Activity", #selector(toggleActivity(_:)), "a", [.command, .shift])
         let item = NSMenuItem(title: "Session", action: nil, keyEquivalent: "")
         item.submenu = menu
         let file = main.items.firstIndex { $0.title == "File" } ?? 0

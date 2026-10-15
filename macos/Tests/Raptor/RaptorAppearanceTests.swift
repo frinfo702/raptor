@@ -10,13 +10,16 @@ struct RaptorAppearanceTests {
         return defaults
     }
 
-    /// A fresh install looks like Rex's screenshots: islands with headers, Blended.
+    /// A fresh install looks like Rex's screenshots: islands with headers, Blended, and
+    /// the sidebar of every tab.
     @Test func freshInstallDefaults() {
         let a = RaptorAppearance(defaults: fresh(), environment: [:])
         #expect(a.style == .blended)
         #expect(a.density == .islands)
         #expect(a.paneHeaders)
         #expect(a.translucentPanes)
+        #expect(a.sidebar)
+        #expect(!a.activity)
     }
 
     @Test func savedAndForcedValues() {
@@ -24,21 +27,29 @@ struct RaptorAppearanceTests {
         defaults.set("compact", forKey: "RaptorPaneDensity")
         defaults.set(false, forKey: "RaptorPaneHeaders")
         defaults.set(false, forKey: "RaptorTranslucentPanes")
+        defaults.set(false, forKey: "RaptorSidebar")
+        defaults.set(true, forKey: "RaptorActivity")
         let saved = RaptorAppearance(defaults: defaults, environment: [:])
         #expect(saved.density == .compact)
         #expect(!saved.paneHeaders)
         #expect(!saved.translucentPanes)
+        #expect(!saved.sidebar)
+        #expect(saved.activity)
 
         let forced = RaptorAppearance(defaults: defaults, environment: [
             "RAPTOR_INTERFACE_STYLE": "solid",
             "RAPTOR_PANE_DENSITY": "islands",
             "RAPTOR_PANE_HEADERS": "1",
             "RAPTOR_TRANSLUCENT_PANES": "1",
+            "RAPTOR_SIDEBAR": "1",
+            "RAPTOR_ACTIVITY": "0",
         ])
         #expect(forced.style == .solid)
         #expect(forced.density == .islands)
         #expect(forced.paneHeaders)
         #expect(forced.translucentPanes)
+        #expect(forced.sidebar)
+        #expect(!forced.activity)
     }
 
     /// Every style keeps unfocused panes undimmed; only the translucent ones let the

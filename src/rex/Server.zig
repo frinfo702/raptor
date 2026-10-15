@@ -87,6 +87,9 @@ const Window = struct {
     tree: Tree,
     focused: *Pane,
     zoomed: ?*Pane = null,
+    /// The block whose program asked for this window (`rap run` or `rap new`
+    /// inside a block), so clients can show it under that program's tab.
+    parent: ?ids.Uuid = null,
 };
 
 /// A block as the server tracks it. The API calls it a block; `Block` is
@@ -1376,6 +1379,7 @@ fn newWindow(self: *Server, s: *Session, req: *Request, label: ?[]const u8) Erro
         .session = s,
         .tree = try .init(self.alloc, pane),
         .focused = pane,
+        .parent = try self.parentBlock(req),
     };
     errdefer w.tree.deinit(self.alloc);
     w.label = if (label) |l|
@@ -1395,6 +1399,17 @@ fn newWindow(self: *Server, s: *Session, req: *Request, label: ?[]const u8) Erro
     self.emit("active_window_changed", &s.id, .{ .window = wid });
     self.viewChanged(s);
     return w;
+}
+
+/// The open block named by the request's `parent` param, if any.
+fn parentBlock(self: *Server, req: *Request) Error!?ids.Uuid {
+    const q = req.str("parent") orelse return null;
+    if (!std.mem.startsWith(u8, q, "block:") or q.len != "block:".len + 36) return null;
+    const id = q["block:".len..][0..36];
+    for (self.sessions.items) |s| for (try sessionPanes(s, req.arena)) |pane| {
+        if (std.mem.eql(u8, &pane.id, id)) return pane.id;
+    };
+    return null;
 }
 
 /// Close a block: hang up its child and drop it from its window. The
@@ -1875,6 +1890,8 @@ fn sessionView(self: *Server, req: *Request, w: *Stringify) Error!void {
         try w.write(prefixed("block", &win.focused.id));
         try w.objectField("zoomed");
         try w.write(if (win.zoomed) |z| prefixed("block", &z.id) else null);
+        try w.objectField("parent");
+        try w.write(if (win.parent) |*p| prefixed("block", p) else null);
         try w.objectField("layout");
         try win.tree.write(w, LeafWriter{});
         try w.objectField("blocks");
@@ -2350,6 +2367,29 @@ test "rex Server: sessions over the socket" {
     );
     defer alloc.free(out_of_range);
     try testing.expect(std.mem.indexOf(u8, out_of_range, "\"code\":\"target\"") != null);
+
+    // A window asked for from inside a block names that block as its parent;
+    // an unknown parent is dropped.
+    const block_at = std.mem.indexOf(u8, created, "\"block\":\"").? + "\"block\":\"".len;
+    const parent = created[block_at..][0 .. "block:".len + 36];
+    const child_req = try std.fmt.allocPrint(alloc,
+        \\{{"id":53,"method":"session.new_window","params":{{"session":"demo","parent":"{s}","command":["/bin/sh","-c","sleep 30"]}}}}
+    , .{parent});
+    defer alloc.free(child_req);
+    const child = try T.call(fd, child_req);
+    defer alloc.free(child);
+    const orphan = try T.call(fd,
+        \\{"id":54,"method":"session.new_window","params":{"session":"demo","parent":"block:nope","command":["/bin/sh","-c","sleep 30"]}}
+    );
+    defer alloc.free(orphan);
+    const family = try T.call(fd,
+        \\{"id":55,"method":"session.view","params":{"session":"demo"}}
+    );
+    defer alloc.free(family);
+    const needle = try std.fmt.allocPrint(alloc, "\"parent\":\"{s}\"", .{parent});
+    defer alloc.free(needle);
+    try testing.expectEqual(1, std.mem.count(u8, family, needle));
+    try testing.expectEqual(3, std.mem.count(u8, family, "\"parent\":null"));
 
     const killed = try T.call(fd,
         \\{"id":6,"method":"session.kill","params":{"session":"demo"}}
