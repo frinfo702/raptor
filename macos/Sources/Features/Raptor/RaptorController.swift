@@ -84,8 +84,12 @@ class RaptorController: BaseTerminalController {
         window.center()
         window.setFrameAutosaveName("Raptor \(session)")
         window.delegate = self
-        // The container draws Glass behind the views when the config asks for it.
-        window.contentView = TerminalViewContainer {
+        // The container draws Glass behind the views when the config asks for it. The
+        // views draw their own title bar, so they see no safe area: SwiftUI would
+        // otherwise stretch the sidebar's scroll view up under the title bar, over the
+        // buttons there, and take their clicks.
+        // ponytail: before macOS 13.3 the safe area still reaches them.
+        window.contentView = TerminalViewContainer(safeAreaRegions: []) {
             RaptorWindowView(ghostty: ghostty, controller: self, appearance: .shared)
         }
         self.window = window

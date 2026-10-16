@@ -334,4 +334,65 @@ final class RaptorSmokeTests: XCTestCase {
         XCTAssertEqual(moves.count, 2, text)
         XCTAssertNotEqual(moves.first, moves.last, "B and A are different owners: \(owners)")
     }
+
+    /// The title bar's sidebar toggle and the sidebar header's eye take clicks: nothing
+    /// in front of them, such as the sidebar's scroll view, swallows them.
+    @MainActor
+    func testTitlebarButtonsTakeClicks() throws {
+        let socket = "/tmp/raptor-xctest-titlebar-\(getpid()).sock"
+        let client = try XCTUnwrap(RaptorClient(socket: socket), "no server started from the bundled rap")
+        let appearance = RaptorAppearance.shared
+        let keys = ["RaptorSidebar", "RaptorActivity"]
+        let saved = keys.map { UserDefaults.standard.object(forKey: $0) }
+        let (sidebar, activity) = (appearance.sidebar, appearance.activity)
+        defer {
+            client.call("server.stop")
+            unlink(socket + ".lock")
+            (appearance.sidebar, appearance.activity) = (sidebar, activity)
+            for (key, value) in zip(keys, saved) { UserDefaults.standard.set(value, forKey: key) }
+        }
+        (appearance.sidebar, appearance.activity) = (true, false)
+        let ghostty = try XCTUnwrap((NSApp.delegate as? AppDelegate)?.ghostty)
+        let created: Created = try XCTUnwrap(client.call("session.create", [
+            "command": ["/bin/sh", "-c", "exec sleep 60"],
+        ]))
+        defer { client.call("session.kill", ["session": created.session]) }
+        let controller = client.open(ghostty, session: created.session)
+        defer { controller.window?.close() }
+        let window = try XCTUnwrap(controller.window)
+
+        func settle(until done: () -> Bool) {
+            let deadline = Date().addingTimeInterval(5)
+            repeat { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } while !done() && Date() < deadline
+        }
+        /// Click `x` points from the window's left edge, in the title bar's middle.
+        func click(_ x: CGFloat) {
+            let point = NSPoint(x: x, y: window.frame.height - RaptorWindowView.titlebarHeight / 2)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                window.sendEvent(NSEvent.mouseEvent(
+                    with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!)
+            }
+        }
+        // The buttons' centres: the toggle 12 pt past the header's 82 pt inset, the eye
+        // 14 pt inside the header's 13 pt trailing inset.
+        let toggle: CGFloat = 82 + 12
+        let eye = RaptorSidebar.width - 13 - 14
+        // Let SwiftUI lay the window out.
+        RunLoop.main.run(until: Date().addingTimeInterval(1))
+
+        click(eye)
+        settle { appearance.activity }
+        XCTAssertTrue(appearance.activity, "the eye didn't turn Activity Mode on")
+        click(eye)
+        settle { !appearance.activity }
+        XCTAssertFalse(appearance.activity, "the eye didn't turn Activity Mode off")
+
+        click(toggle)
+        settle { !appearance.sidebar }
+        XCTAssertFalse(appearance.sidebar, "Hide Sidebar didn't hide it")
+        click(toggle)
+        settle { appearance.sidebar }
+        XCTAssertTrue(appearance.sidebar, "Show Sidebar didn't show it")
+    }
 }

@@ -22,8 +22,11 @@ class TerminalViewContainer: NSView {
         return window.value(forKey: "_cornerRadius") as? CGFloat
     }
 
-    init<Root: View>(@ViewBuilder rootView: () -> Root) {
-        self.terminalView = NSHostingView(rootView: rootView())
+    /// `safeAreaRegions` are the window's safe areas the SwiftUI content sees.
+    init<Root: View>(safeAreaRegions: SafeAreaRegions = .all, @ViewBuilder rootView: () -> Root) {
+        let hostingView = NSHostingView(rootView: rootView())
+        if #available(macOS 13.3, *) { hostingView.safeAreaRegions = safeAreaRegions }
+        self.terminalView = hostingView
         super.init(frame: .zero)
         setup()
     }
