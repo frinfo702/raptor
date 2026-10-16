@@ -73,6 +73,8 @@ pub const Launch = struct {
     env: *const EnvMap,
     /// Seconds, as `rap server run --idle-timeout` takes them.
     idle_timeout: ?[]const u8 = null,
+    /// More `rap server run` flags, such as `--tailnet`.
+    args: []const []const u8 = &.{},
 };
 
 /// Connect to the server at `path`, starting one with `launch` if none is
@@ -111,11 +113,15 @@ pub fn deinit(self: *Client) void {
     self.alloc.destroy(self);
 }
 
-/// Connect to the server at `path`, starting one with `launch` if none is
-/// running. `Unreachable` means there is still no server.
+/// Connect to the server at `path`, a socket path or a tailnet server's
+/// address (`protocol.resolveServer`), starting one on the socket with
+/// `launch` if none is running. `Unreachable` means there is still no
+/// server.
 pub fn dial(alloc: Allocator, io: std.Io, path: []const u8, launch: ?Launch) !posix.fd_t {
     const fd = protocol.connect(path) catch |err| fd: {
         if (err != error.Unreachable) return err;
+        // A tailnet server is started on its own machine.
+        if (protocol.tailnetAddress(path) != null) return err;
         const l = launch orelse return err;
         if (l.env.get("RAP_AUTOSTART")) |v| if (std.mem.eql(u8, v, "0")) return err;
         try launchServer(alloc, io, l, path);
@@ -548,6 +554,7 @@ pub fn launchServer(gpa: Allocator, io: std.Io, launch: Launch, socket_path: []c
     var argv: std.ArrayList(?[*:0]const u8) = .empty;
     try argv.appendSlice(alloc, &.{ exe, "server", "run", "-S", try alloc.dupeSentinel(u8, socket_path, 0) });
     if (launch.idle_timeout) |t| try argv.appendSlice(alloc, &.{ "--idle-timeout", try alloc.dupeSentinel(u8, t, 0) });
+    for (launch.args) |a| try argv.append(alloc, try alloc.dupeSentinel(u8, a, 0));
     try argv.append(alloc, null);
 
     var envp: std.ArrayList(?[*:0]const u8) = .empty;

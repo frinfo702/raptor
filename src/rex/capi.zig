@@ -21,13 +21,12 @@ export fn rap_client_connect(socket_path: ?[*:0]const u8) ?*Client {
 fn connect(socket_path: ?[*:0]const u8) !*Client {
     const alloc = global.alloc();
     const io = global.io();
-    if (socket_path) |p| return Client.connect(alloc, io, std.mem.span(p), null);
-
     var arena: std.heap.ArenaAllocator = .init(alloc);
     defer arena.deinit();
     var env = try global.environMap();
     defer env.deinit();
-    const path = try protocol.resolveSocketPath(arena.allocator(), io, &env, null);
+    const flag = if (socket_path) |p| std.mem.span(p) else null;
+    const path = try protocol.resolveServer(arena.allocator(), io, &env, flag);
     return Client.connect(alloc, io, path, null);
 }
 

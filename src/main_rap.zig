@@ -10,6 +10,7 @@ const exit = @import("rap/exit.zig");
 const cli = @import("rap/cli.zig");
 const Server = @import("rex/Server.zig");
 const protocol = @import("rex/protocol.zig");
+const tailscale = @import("rex/tailscale.zig");
 
 pub const ExitCode = exit.Code;
 
@@ -86,6 +87,24 @@ fn onSignal(_: posix.SIG) callconv(.c) void {
 /// `rap server run`: serve in the foreground until stopped or idle.
 fn serverRun(init: std.process.Init, args: cli.Args, stderr: *std.Io.Writer) !ExitCode {
     const alloc = init.arena.allocator();
+    if (!args.tailnet and (args.port != null or args.allow != null)) {
+        try stderr.writeAll("rap: --port and --allow need --tailnet\n");
+        return .usage;
+    }
+    const tailnet: ?Server.Tailnet = if (args.tailnet) .{
+        .port = if (args.port) |p| std.fmt.parseInt(u16, p, 10) catch {
+            try stderr.print("rap: invalid --port '{s}'\n", .{p});
+            return .usage;
+        } else tailscale.default_port,
+        .allow = allow: {
+            var list: std.ArrayList([]const u8) = .empty;
+            var it = std.mem.tokenizeScalar(u8, args.allow orelse "", ',');
+            while (it.next()) |login| try list.append(alloc, login);
+            break :allow list.items;
+        },
+    } else null;
+    // A tailnet server waits for clients on other machines.
+    const idle_default: u64 = if (tailnet != null) std.math.maxInt(u64) else 30_000;
     const idle_ms: u64 = if (args.idle_timeout) |t| ms: {
         const secs = std.fmt.parseFloat(f64, t) catch std.math.nan(f64);
         if (!(secs >= 0 and secs <= 1e9)) {
@@ -93,7 +112,7 @@ fn serverRun(init: std.process.Init, args: cli.Args, stderr: *std.Io.Writer) !Ex
             return .usage;
         }
         break :ms @intFromFloat(secs * 1000);
-    } else 30_000;
+    } else idle_default;
     const path = try protocol.resolveSocketPath(alloc, init.io, init.environ_map, args.server);
 
     // The pty and process code expects Ghostty's global state.
@@ -122,9 +141,12 @@ fn serverRun(init: std.process.Init, args: cli.Args, stderr: *std.Io.Writer) !Ex
         .idle_timeout_ms = idle_ms,
         .shell_integration = .load(alloc),
         .bin_dir = std.fs.path.dirname(exe_buf[0..exe_len]),
+        .tailnet = tailnet,
     }) catch |err| {
         switch (err) {
             error.AlreadyRunning => try stderr.print("rap: server already running on {s}\n", .{path}),
+            error.TailscaleUnavailable => try stderr.writeAll("rap: --tailnet needs Tailscale running and signed in here\n"),
+            error.AddressInUse => try stderr.print("rap: tailnet port {d} is in use\n", .{tailnet.?.port}),
             else => try stderr.print("rap: starting server on {s} failed: {t}\n", .{ path, err }),
         }
         return .fail;

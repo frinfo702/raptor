@@ -1,5 +1,6 @@
 //! The rap server: one process per user that owns every session, window
-//! and block, and answers clients over a Unix socket.
+//! and block, and answers clients over a Unix socket and, with `tailnet`,
+//! over its node's tailnet address.
 //!
 //! Everything runs on one libxev loop thread: the listener, every client
 //! socket, every block's pty and child, and a tick timer for idle exit.
@@ -35,6 +36,7 @@ const listdir = @import("listdir.zig");
 const proc = @import("proc.zig");
 const protocol = @import("protocol.zig");
 const shell = @import("shell.zig");
+const tailscale = @import("tailscale.zig");
 const program_status = @import("../terminal/osc/parsers/program_status.zig");
 
 const log = std.log.scoped(.rex_server);
@@ -66,6 +68,16 @@ pub const Options = struct {
 
     /// The directory of the `rap` binary, appended to the blocks' PATH.
     bin_dir: ?[]const u8 = null,
+
+    /// Also listen on this node's tailnet address.
+    tailnet: ?Tailnet = null,
+};
+
+pub const Tailnet = struct {
+    port: u16 = tailscale.default_port,
+    /// The login names of other Tailscale users who may connect, besides
+    /// the node's own user. They get its shell. Must outlive the server.
+    allow: []const []const u8 = &.{},
 };
 
 const Tree = layout.Tree(*Pane);
@@ -185,11 +197,20 @@ const Waiter = struct {
     id: ?i64,
 };
 
+/// Who a client is.
+const Principal = union(enum) {
+    /// A process of this user on this machine.
+    unix: protocol.Peer,
+    /// A tailnet node, its user, and its `ip:port`, as WhoIs names them.
+    /// The strings are slices of `buf`.
+    tailscale: struct { buf: []u8, login: []const u8, node: []const u8, addr: []const u8 },
+};
+
 const Client = struct {
     server: *Server,
     id: ids.Uuid,
     fd: posix.fd_t,
-    peer: protocol.Peer,
+    principal: Principal,
     poll_c: xev.Completion = .{},
     /// The read poll is on the loop.
     reading: bool = true,
@@ -216,6 +237,14 @@ socket_unlinked: bool = false,
 lock_fd: posix.fd_t,
 listen_fd: posix.fd_t,
 listen_c: xev.Completion = .{},
+/// The tailnet listener, or -1, and where it listens.
+tailnet_fd: posix.fd_t = -1,
+tailnet_c: xev.Completion = .{},
+tailnet_addr: ?[]u8 = null,
+/// The Tailscale user whose nodes may connect: this node's, unless it is
+/// tagged.
+tailnet_user: ?i64 = null,
+tailnet_allow: []const []const u8 = &.{},
 timer: xev.Timer,
 timer_c: xev.Completion = .{},
 compress_timer: xev.Timer,
@@ -292,6 +321,25 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
     if (c.listen(fd, 64) != 0) return error.ListenFailed;
     protocol.setNonblocking(fd, true);
 
+    var tailnet_fd: posix.fd_t = -1;
+    errdefer if (tailnet_fd >= 0) {
+        _ = c.close(tailnet_fd);
+    };
+    var tailnet_addr: ?[]u8 = null;
+    errdefer if (tailnet_addr) |a| alloc.free(a);
+    var tailnet_user: ?i64 = null;
+    if (opts.tailnet) |t| {
+        var arena: std.heap.ArenaAllocator = .init(alloc);
+        defer arena.deinit();
+        const st = tailscale.status(arena.allocator(), io) catch return error.TailscaleUnavailable;
+        const where: std.Io.net.Ip4Address = .{ .bytes = st.self.ip, .port = t.port };
+        tailnet_fd = try protocol.listenTcp(where);
+        tailnet_addr = try std.fmt.allocPrint(alloc, "{f}", .{where});
+        tailnet_user = st.self.user;
+        if (tailnet_user == null and t.allow.len == 0)
+            log.warn("this node is tagged, so only users named by --allow may connect over the tailnet", .{});
+    }
+
     var env: EnvMap = .init(alloc);
     errdefer env.deinit();
     for (protocol.daemon_env) |k| if (opts.env.get(k)) |v| try env.put(k, v);
@@ -310,6 +358,10 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
         .socket_path = path,
         .lock_fd = lock_fd,
         .listen_fd = fd,
+        .tailnet_fd = tailnet_fd,
+        .tailnet_addr = tailnet_addr,
+        .tailnet_user = tailnet_user,
+        .tailnet_allow = if (opts.tailnet) |t| t.allow else &.{},
         .timer = try .init(),
         .compress_timer = try .init(),
         .env = env,
@@ -325,8 +377,10 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
 /// this returns.
 pub fn run(self: *Server) !void {
     xev.TCP.initFd(self.listen_fd).poll(&self.loop, &self.listen_c, .read, Server, self, onListen);
+    if (self.tailnet_fd >= 0) xev.TCP.initFd(self.tailnet_fd).poll(&self.loop, &self.tailnet_c, .read, Server, self, onTailnetListen);
     self.timer.run(&self.loop, &self.timer_c, tick_ms, Server, self, onTick);
     log.info("listening on {s}", .{self.socket_path});
+    if (self.tailnet_addr) |a| log.info("listening on the tailnet at {s}", .{a});
     while (!self.stopping) {
         try self.loop.run(.once);
         self.reapDead();
@@ -357,6 +411,8 @@ pub fn destroy(self: *Server) void {
     self.compress_queue.deinit(self.alloc);
     self.unlinkSocket();
     _ = c.close(self.listen_fd);
+    if (self.tailnet_fd >= 0) _ = c.close(self.tailnet_fd);
+    if (self.tailnet_addr) |a| self.alloc.free(a);
     _ = c.close(self.lock_fd);
     self.timer.deinit();
     self.compress_timer.deinit();
@@ -518,53 +574,162 @@ fn onListen(
     _: xev.TCP,
     r: xev.PollError!xev.PollEvent,
 ) xev.CallbackAction {
-    const self = self_.?;
     _ = r catch |err| if (err == error.Canceled) return .disarm;
-    while (true) {
-        const fd = c.accept(self.listen_fd, null, null);
-        if (fd < 0) break;
-        self.addClient(fd);
-    }
+    self_.?.acceptAll(self_.?.listen_fd);
     return Block.rearm(comp);
 }
 
-fn addClient(self: *Server, fd: posix.fd_t) void {
-    protocol.setCloexec(fd);
+fn onTailnetListen(
+    self_: ?*Server,
+    _: *xev.Loop,
+    comp: *xev.Completion,
+    _: xev.TCP,
+    r: xev.PollError!xev.PollEvent,
+) xev.CallbackAction {
+    _ = r catch |err| if (err == error.Canceled) return .disarm;
+    self_.?.acceptAll(self_.?.tailnet_fd);
+    return Block.rearm(comp);
+}
+
+/// Accept every waiting client of the Unix socket or the tailnet listener.
+fn acceptAll(self: *Server, listen_fd: posix.fd_t) void {
+    while (true) {
+        const fd = c.accept(listen_fd, null, null);
+        if (fd < 0) break;
+        protocol.setCloexec(fd);
+        if (comptime builtin.os.tag.isDarwin()) {
+            const on: c_int = 1;
+            _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.NOSIGPIPE, &on, @sizeOf(c_int));
+        }
+        const principal = (if (listen_fd == self.listen_fd) unixPrincipal(fd) else self.tailnetPrincipal(fd)) orelse {
+            _ = c.close(fd);
+            continue;
+        };
+        self.addClient(fd, principal);
+    }
+}
+
+/// A Unix socket client, if it runs as this user.
+fn unixPrincipal(fd: posix.fd_t) ?Principal {
+    const p = protocol.peer(fd) catch return null;
+    if (p.uid != c.getuid()) {
+        log.warn("rejecting client uid={d} pid={d}", .{ p.uid, p.pid });
+        return null;
+    }
+    return .{ .unix = p };
+}
+
+/// A tailnet client, if its node's user may use this server. One that may
+/// not is told why.
+// ponytail: WhoIs blocks the loop for a LocalAPI round trip, about a
+// millisecond (its 2 s timeout at worst); ask off the loop if that shows.
+fn tailnetPrincipal(self: *Server, fd: posix.fd_t) ?Principal {
+    protocol.setNodelay(fd);
+    var arena: std.heap.ArenaAllocator = .init(self.alloc);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const addr = std.fmt.allocPrint(alloc, "{f}", .{protocol.peerAddress(fd) orelse return null}) catch return null;
+    const node = tailscale.whois(alloc, self.io, addr) catch |err| {
+        log.warn("rejecting tailnet client {s}: whois failed: {t}", .{ addr, err });
+        refuse(fd, "the server could not ask Tailscale who {s} is", .{addr});
+        return null;
+    };
+    if (!allowed(self.tailnet_user, self.tailnet_allow, node)) {
+        const who = if (node.user == null) "tagged node" else node.login;
+        log.warn("rejecting tailnet client {s} ({s} on {s})", .{ addr, who, node.name });
+        refuse(fd, "{s} on {s} may not use this server", .{ who, node.name });
+        return null;
+    }
+    const buf = std.mem.concat(self.alloc, u8, &.{ node.login, node.name, addr }) catch return null;
+    const login = buf[0..node.login.len];
+    const name = buf[login.len..][0..node.name.len];
+    return .{ .tailscale = .{ .buf = buf, .login = login, .node = name, .addr = buf[login.len + name.len ..] } };
+}
+
+/// Whether a tailnet node may use the server: its user is the server
+/// node's own (`owner`), or one that `allow` names. A tagged node has no
+/// user, so it may not.
+fn allowed(owner: ?i64, allow: []const []const u8, node: tailscale.Node) bool {
+    const user = node.user orelse return false;
+    if (owner) |o| if (o == user) return true;
+    if (node.login.len == 0) return false;
+    for (allow) |login| if (std.ascii.eqlIgnoreCase(login, node.login)) return true;
+    return false;
+}
+
+/// Tell a client it may not connect: `{"event":"refused","message":...}`.
+fn refuse(fd: posix.fd_t, comptime fmt: []const u8, args: anytype) void {
+    var msg_buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&msg_buf, fmt, args) catch return;
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    Stringify.value(.{ .event = "refused", .message = msg }, .{}, &w) catch return;
+    protocol.writeFrame(fd, .json, w.buffered()) catch {};
+}
+
+test "rex Server: who may connect over the tailnet" {
+    const testing = std.testing;
+    const mine: tailscale.Node = .{ .name = "box", .ip = .{ 100, 96, 1, 3 }, .user = 7, .login = "me@github" };
+    const theirs: tailscale.Node = .{ .name = "pal", .ip = .{ 100, 96, 1, 4 }, .user = 8, .login = "Pal@github" };
+    const tagged: tailscale.Node = .{ .name = "ci", .ip = .{ 100, 96, 1, 5 }, .user = null };
+    try testing.expect(allowed(7, &.{}, mine));
+    try testing.expect(!allowed(7, &.{}, theirs));
+    try testing.expect(allowed(7, &.{"pal@github"}, theirs));
+    try testing.expect(!allowed(7, &.{""}, tagged));
+    // A tagged server has no user of its own.
+    try testing.expect(!allowed(null, &.{}, mine));
+    try testing.expect(allowed(null, &.{"me@github"}, mine));
+
+    // A refused client hears why.
+    var fds: [2]c.fd_t = undefined;
+    try testing.expectEqual(0, c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &fds));
+    defer for (fds) |fd| {
+        _ = c.close(fd);
+    };
+    refuse(fds[0], "{s} on {s} may not use this server", .{ theirs.login, theirs.name });
+    const frame = try protocol.readFrame(testing.allocator, fds[1]);
+    defer testing.allocator.free(frame.payload);
+    try testing.expectEqualStrings(
+        \\{"event":"refused","message":"Pal@github on pal may not use this server"}
+    , frame.payload);
+}
+
+fn freePrincipal(self: *Server, p: Principal) void {
+    switch (p) {
+        .unix => {},
+        .tailscale => |t| self.alloc.free(t.buf),
+    }
+}
+
+fn addClient(self: *Server, fd: posix.fd_t, principal: Principal) void {
     // Reads and writes never block the loop: they use MSG_DONTWAIT, and a
     // write that doesn't fit waits on the loop. libxev's io_uring backend
     // needs a blocking socket to wait on, the others a nonblocking one.
     protocol.setNonblocking(fd, xev.backend != .io_uring);
-    if (comptime builtin.os.tag.isDarwin()) {
-        const on: c_int = 1;
-        _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.NOSIGPIPE, &on, @sizeOf(c_int));
-    }
-
-    const p = protocol.peer(fd) catch {
-        _ = c.close(fd);
-        return;
-    };
-    if (p.uid != c.getuid()) {
-        log.warn("rejecting client uid={d} pid={d}", .{ p.uid, p.pid });
-        _ = c.close(fd);
-        return;
-    }
 
     const cl = self.alloc.create(Client) catch {
+        self.freePrincipal(principal);
         _ = c.close(fd);
         return;
     };
-    cl.* = .{ .server = self, .id = ids.uuidv7(self.io), .fd = fd, .peer = p };
+    cl.* = .{ .server = self, .id = ids.uuidv7(self.io), .fd = fd, .principal = principal };
     self.clients.append(self.alloc, cl) catch {
         self.alloc.destroy(cl);
+        self.freePrincipal(principal);
         _ = c.close(fd);
         return;
     };
     xev.TCP.initFd(fd).poll(&self.loop, &cl.poll_c, .read, Client, cl, onClient);
-    self.emit("client_connected", null, .{
-        .client = prefixed("client", &cl.id),
-        .uid = p.uid,
-        .pid = p.pid,
-    });
+    const id = prefixed("client", &cl.id);
+    switch (principal) {
+        .unix => |p| self.emit("client_connected", null, .{ .client = id, .uid = p.uid, .pid = p.pid }),
+        .tailscale => |t| self.emit("client_connected", null, .{
+            .client = id,
+            .transport = "tailscale",
+            .login = t.login,
+            .node = t.node,
+        }),
+    }
 }
 
 fn onClient(
@@ -668,6 +833,7 @@ fn removeWaiters(pane: *Pane, cl: *Client) void {
 
 fn freeClient(self: *Server, cl: *Client) void {
     _ = c.close(cl.fd);
+    self.freePrincipal(cl.principal);
     cl.in.deinit(self.alloc);
     cl.outbox.deinit(self.alloc);
     // Streams are left only if the client was never dropped, and then
@@ -1726,6 +1892,7 @@ fn serverStatus(self: *Server, _: *Request, w: *Stringify) Error!void {
         .protocol = protocol.version,
         .pid = c.getpid(),
         .socket = self.socket_path,
+        .tailnet = self.tailnet_addr,
         .sessions = self.sessions.items.len,
         .clients = self.clients.items.len,
         .uptime_ms = self.nowMs() - self.started_ms,
@@ -1923,16 +2090,17 @@ fn sessionView(self: *Server, req: *Request, w: *Stringify) Error!void {
     for (self.clients.items) |cl| {
         const f = cl.filter orelse continue;
         if (!std.mem.eql(u8, &f, &s.id)) continue;
-        try w.write(.{
-            .id = prefixed("client", &cl.id),
-            .principal = .{
-                .kind = "peer",
-                .transport = "unix",
-                .uid = cl.peer.uid,
-                .gid = cl.peer.gid,
-                .pid = cl.peer.pid,
-            },
-        });
+        const id = prefixed("client", &cl.id);
+        switch (cl.principal) {
+            .unix => |p| try w.write(.{
+                .id = id,
+                .principal = .{ .kind = "peer", .transport = "unix", .uid = p.uid, .gid = p.gid, .pid = p.pid },
+            }),
+            .tailscale => |t| try w.write(.{
+                .id = id,
+                .principal = .{ .kind = "peer", .transport = "tailscale", .login = t.login, .node = t.node, .addr = t.addr },
+            }),
+        }
     }
     try w.endArray();
     try w.endObject();
