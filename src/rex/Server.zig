@@ -63,6 +63,9 @@ pub const Options = struct {
 
     /// Ghostty's shell integration for the blocks' shells.
     shell_integration: shell.Integration = .{},
+
+    /// The directory of the `rap` binary, appended to the blocks' PATH.
+    bin_dir: ?[]const u8 = null,
 };
 
 const Tree = layout.Tree(*Pane);
@@ -292,6 +295,7 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
     var env: EnvMap = .init(alloc);
     errdefer env.deinit();
     for (protocol.daemon_env) |k| if (opts.env.get(k)) |v| try env.put(k, v);
+    if (opts.bin_dir) |dir| try appendPath(alloc, &env, dir);
 
     const read_buf = try alloc.create(Block.ReadBuffer);
     errdefer alloc.destroy(read_buf);
@@ -1297,6 +1301,18 @@ fn resizePane(self: *Server, pane: *Pane, size: protocol.Size) void {
     });
 }
 
+/// Append `dir` to PATH unless it is already there, last so the user's
+/// own commands win, as Ghostty does for its binary in a surface.
+fn appendPath(alloc: Allocator, env: *EnvMap, dir: []const u8) !void {
+    const path = env.get("PATH") orelse "";
+    if (path.len == 0) return env.put("PATH", dir);
+    var it = std.mem.tokenizeScalar(u8, path, ':');
+    while (it.next()) |entry| if (std.mem.eql(u8, entry, dir)) return;
+    const joined = try std.fmt.allocPrint(alloc, "{s}:{s}", .{ path, dir });
+    defer alloc.free(joined);
+    try env.put("PATH", joined);
+}
+
 // Model
 
 fn sessionByLabel(self: *Server, label: []const u8) ?*Session {
@@ -2290,7 +2306,7 @@ test "rex Server: sessions over the socket" {
     try env.put("PATH", "/usr/bin:/bin");
     try env.put("FOO", "leaked");
 
-    const server = try Server.create(alloc, testing.io, .{ .socket_path = path, .env = &env });
+    const server = try Server.create(alloc, testing.io, .{ .socket_path = path, .env = &env, .bin_dir = "/opt/rap" });
     defer server.destroy();
     try testing.expectError(error.AlreadyRunning, Server.create(alloc, testing.io, .{ .socket_path = path, .env = &env }));
 
@@ -2312,7 +2328,7 @@ test "rex Server: sessions over the socket" {
     };
 
     const created = try T.call(fd,
-        \\{"id":1,"method":"session.create","params":{"label":"demo","command":["/bin/sh","-c","echo FOO=$FOO; echo SESSION=$RAP_SESSION; sleep 30"]}}
+        \\{"id":1,"method":"session.create","params":{"label":"demo","command":["/bin/sh","-c","echo FOO=$FOO; echo PATH=$PATH; echo SESSION=$RAP_SESSION; sleep 30"]}}
     );
     defer alloc.free(created);
     try testing.expect(std.mem.indexOf(u8, created, "\"label\":\"demo\"") != null);
@@ -2333,6 +2349,7 @@ test "rex Server: sessions over the socket" {
         defer alloc.free(captured);
         if (std.mem.indexOf(u8, captured, "SESSION=session:") != null) {
             try testing.expect(std.mem.indexOf(u8, captured, "leaked") == null);
+            try testing.expect(std.mem.indexOf(u8, captured, "PATH=/usr/bin:/bin:/opt/rap") != null);
             break;
         }
         if (tries == 200) return error.TestUnexpectedResult;

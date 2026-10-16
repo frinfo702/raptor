@@ -9,7 +9,7 @@ Build first (Zig 0.17 comes from the nix dev shell):
 ```sh
 direnv exec . zig build      # or: nix develop -c zig build
 APP=macos/build/Debug/Raptor.app
-RAP=zig-out/bin/rap          # panes don't have rap on PATH yet
+RAP=zig-out/bin/rap          # panes have rap on PATH; other terminals don't
 ```
 
 Rebuild after every checkout: an older `$APP` runs older code, and the
