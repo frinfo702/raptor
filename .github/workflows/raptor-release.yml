@@ -1,5 +1,6 @@
 # Fork-only: attach a self-signed (or, without the signing secrets,
-# ad-hoc-signed) Raptor DMG to each GitHub release.
+# ad-hoc-signed) Raptor DMG to each GitHub release, plus standalone rap
+# tarballs and their curl installer.
 # Free (no Apple Developer Program), so the app is not notarized and the
 # release notes tell users how to open it.
 name: Raptor Release DMG
@@ -162,3 +163,39 @@ jobs:
           and local builds signed with the same certificate share the grant.
           EOF
           gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+
+  # Standalone rap for remote machines, installed with
+  # `curl -fsSL .../releases/latest/download/install-rap.sh | sh`.
+  # Zig cross-compiles every target from one runner; Linux is static musl.
+  rap:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # Built from the tag with current tooling, as in the dmg job.
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+
+      - name: Checkout release tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: .release-tools
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+
+      - name: Build rap tarballs
+        run: RAPTOR_SRC="$PWD" .release-tools/dist/rap/rap-release.sh "$TAG"
+
+      - name: Upload rap tarballs and installer
+        run: |
+          set -euo pipefail
+          cp .release-tools/dist/rap/install.sh install-rap.sh
+          gh release upload "$TAG" rap-*.tar.gz rap-SHA256SUMS install-rap.sh \
+            --clobber --repo "$GITHUB_REPOSITORY"
