@@ -169,10 +169,7 @@ pub fn sshDestination(alloc: Allocator, io: std.Io, env: *const EnvMap, flag: ?[
 fn hosts(alloc: Allocator, io: std.Io, env: *const EnvMap) ![]const []const u8 {
     const home = env.get("HOME") orelse return &.{};
     const path = try std.fs.path.join(alloc, &.{ home, ".ssh", "config" });
-    const text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(1 << 20)) catch |e| switch (e) {
-        error.FileNotFound => return &.{},
-        else => return e,
-    };
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(1 << 20)) catch return &.{};
     return parseHosts(alloc, text);
 }
 
@@ -233,11 +230,12 @@ const Ctx = struct {
     const Error = anyerror;
 
     fn dispatch(self: *Ctx) Error!ExitCode {
-        if (try sshDestination(self.alloc, self.io, self.env, self.args.server)) |dest| {
+        const words = self.args.words;
+        const local = words.len > 0 and std.mem.eql(u8, words[0], "hosts");
+        if (!local) if (try sshDestination(self.alloc, self.io, self.env, self.args.server)) |dest| {
             const argv = [_][]const u8{ "ssh", "--", dest, try remoteCommand(self.alloc, self.argv) };
             return std.process.replace(self.io, .{ .argv = &argv });
-        }
-        const words = self.args.words;
+        };
         if (words.len == 0) {
             try self.err.writeAll(usage);
             return .usage;
@@ -962,6 +960,39 @@ test "rap cli: ssh destination" {
     try env.put("RAP_SERVER", "ssh://box");
     try std.testing.expectEqualStrings("ssh://box", (try sshDestination(alloc, std.testing.io, &env, null)).?);
     try std.testing.expectEqual(null, try sshDestination(alloc, std.testing.io, &env, "/tmp/s.sock"));
+}
+
+test "rap cli: hosts runs locally under RAP_SERVER" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, ".ssh");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/config", .data = "Host studio\n" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = buf[0..try tmp.dir.realPathFile(std.testing.io, ".", &buf)];
+    var env: EnvMap = .init(alloc);
+    try env.put("HOME", home);
+    try env.put("RAP_SERVER", "studio");
+    var out: Writer.Allocating = .init(alloc);
+    var err: Writer.Allocating = .init(alloc);
+    try std.testing.expectEqual(.ok, try run(alloc, std.testing.io, &env, &.{"hosts"}, &out.writer, &err.writer));
+    try std.testing.expectEqualStrings("studio\n", out.written());
+}
+
+test "rap cli: unreadable ssh config has no hosts" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, ".ssh/config");
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = buf[0..try tmp.dir.realPathFile(std.testing.io, ".", &buf)];
+    var env: EnvMap = .init(alloc);
+    try env.put("HOME", home);
+    try std.testing.expectEqual(null, try sshDestination(alloc, std.testing.io, &env, "s.sock"));
 }
 
 test "rap cli: remote command drops the server and quotes" {

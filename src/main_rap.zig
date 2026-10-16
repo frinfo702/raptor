@@ -50,7 +50,9 @@ fn run(
         return .usage;
     }
 
-    const cmd = args[0];
+    var bad: []const u8 = "";
+    const words = if (cli.parse(alloc, args, &bad)) |a| a.words else |_| &.{};
+    const cmd = if (words.len > 0) words[0] else "";
     if (std.mem.eql(u8, cmd, "version")) {
         try stdout.print("rap {s}\n", .{options.app_version_string});
         return .ok;
@@ -142,10 +144,12 @@ fn testRun(args: []const []const u8, expected: ExitCode, out: []const u8, err: [
 
 test "rap version" {
     try testRun(&.{"version"}, .ok, "rap " ++ options.app_version_string ++ "\n", "");
+    try testRun(&.{ "-S", "ssh://box", "version" }, .ok, "rap " ++ options.app_version_string ++ "\n", "");
 }
 
 test "rap help" {
     try testRun(&.{"help"}, .ok, usage, "");
+    try testRun(&.{ "-S", "ssh://box", "help" }, .ok, usage, "");
 }
 
 test "rap without a command is a usage error" {
