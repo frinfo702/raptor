@@ -294,7 +294,10 @@ struct RaptorSidebar: View {
     var body: some View {
         let rows = RaptorSidebarModel.rows(model.sessions, activity: appearance.activity)
         VStack(spacing: 0) {
+            // SwiftUI stretches the scroll view up into the title bar's safe area, so
+            // the header stays in front of it to keep its buttons' clicks.
             header
+                .zIndex(1)
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 0) {
                     RaptorSidebarHost(name: "This Mac", symbol: "laptopcomputer")
