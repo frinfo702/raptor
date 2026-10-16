@@ -230,7 +230,11 @@ class RaptorController: BaseTerminalController {
         activeTab = view.active_window
         let tree = trees[view.active_window] ?? .init()
         let reshaped = tree.root != surfaceTree.root || tree.zoomed != surfaceTree.zoomed
-        if reshaped { surfaceTree = tree }
+        if reshaped {
+            applyingView = true
+            surfaceTree = tree
+            applyingView = false
+        }
 
         // Focus the server's focused block when the tab changes, the server moves focus
         // (a new split, from here or elsewhere), or focus was lost. A reshaped tree
@@ -312,6 +316,28 @@ class RaptorController: BaseTerminalController {
             title: RaptorTabView.isDefaultLabel(w.label, window: w.id) ? focused.headerTitle : w.label ?? "",
             program: focused.program,
             others: others)
+    }
+
+    /// Set while the tree is the server's, so its ratios aren't sent back to it.
+    private var applyingView = false
+
+    /// Splits resized here (a dragged divider, a resize key, equalizing) resize on the
+    /// server, whose next view would otherwise put the old ratios back.
+    override func surfaceTreeDidChange(from: SplitTree<Ghostty.SurfaceView>, to: SplitTree<Ghostty.SurfaceView>) {
+        super.surfaceTreeDidChange(from: from, to: to)
+        guard !applyingView, let old = from.root, let new = to.root, old.leaves() == new.leaves() else { return }
+        sendRatios(old, new)
+    }
+
+    private func sendRatios(_ old: SplitTree<Ghostty.SurfaceView>.Node, _ new: SplitTree<Ghostty.SurfaceView>.Node) {
+        guard case .split(let o) = old, case .split(let n) = new, o.direction == n.direction else { return }
+        if o.ratio != n.ratio,
+           let a = block(of: n.left.leftmostLeaf()),
+           let b = block(of: n.right.leftmostLeaf()) {
+            client.call("session.resize_split", ["session": session, "block": a, "target": b, "ratio": n.ratio])
+        }
+        sendRatios(o.left, n.left)
+        sendRatios(o.right, n.right)
     }
 
     /// The block shown by a surface.
