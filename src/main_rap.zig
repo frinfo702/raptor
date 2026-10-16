@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !u8 {
     const stdout = &stdout_writer.interface;
     const stderr = &stderr_writer.interface;
 
-    const code = if (serverRunArgs(alloc, argv)) |a|
+    const code = if (try serverRunArgs(alloc, init.io, init.environ_map, argv)) |a|
         try serverRun(init, a, stderr)
     else
         try run(alloc, init.io, init.environ_map, argv, stdout, stderr);
@@ -62,12 +62,18 @@ fn run(
     return cli.run(alloc, io, env, args, stdout, stderr);
 }
 
-/// The parsed arguments if they are `rap server run`.
-fn serverRunArgs(alloc: std.mem.Allocator, argv: []const []const u8) ?cli.Args {
+/// The parsed arguments if they are `rap server run` on this machine.
+fn serverRunArgs(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    argv: []const []const u8,
+) !?cli.Args {
     var bad: []const u8 = "";
     const a = cli.parse(alloc, argv, &bad) catch return null;
     if (a.words.len != 2 or !std.mem.eql(u8, a.words[0], "server") or
         !std.mem.eql(u8, a.words[1], "run")) return null;
+    if (try cli.sshDestination(alloc, io, env, a.server) != null) return null;
     return a;
 }
 
