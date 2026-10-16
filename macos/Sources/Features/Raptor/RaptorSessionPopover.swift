@@ -82,7 +82,9 @@ struct RaptorSessionPopover: View {
         .shadow(color: .black.opacity(0.3), radius: 16, y: 8)
         .environment(\.colorScheme, tokens.isLight ? .light : .dark)
         .onAppear {
-            sessions = controller.client.sessions()
+            // The sidebar's sessions, kept current from the server's events, so the list
+            // is there as the switcher opens.
+            sessions = controller.client.sidebar.sessions.map { .init(id: $0.id, label: $0.label) }
             selected = sessions.firstIndex { $0.id == controller.session }
         }
         .onChange(of: query) { q in selected = q.isEmpty ? nil : 0 }

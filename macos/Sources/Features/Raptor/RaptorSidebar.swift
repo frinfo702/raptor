@@ -55,21 +55,28 @@ final class RaptorSidebarModel: ObservableObject {
         }
     }
 
+    /// Fetch the views off the main thread, then show them.
     private func reload() {
         guard let client else { return }
-        views = client.sessions().compactMap { s in
-            let view: RaptorController.SessionView? = client.call("session.view", ["session": s.id])
-            return view.map { (s.id, $0) }
-        }
+        let known = Set(blocks.filter { $0.value.process != nil }.keys)
+        client.request({ c in
+            c.sessions().compactMap { s in c.view(s.id, known: known).map { (id: s.id, view: $0.view, processes: $0.processes) } }
+        }, done: { [weak self] fetched in
+            self?.apply(fetched)
+        })
+    }
+
+    private func apply(_ fetched: [(id: String, view: RaptorController.SessionView, processes: [String: String])]) {
+        views = fetched.map { ($0.id, $0.view) }
         var seen: Set<String> = []
-        for (_, view) in views {
+        for (_, view, processes) in fetched {
             for w in view.windows {
                 for b in w.blocks {
                     seen.insert(b.id)
                     var block = blocks[b.id] ?? .init()
                     block.title = b.title
                     block.pwd = RaptorController.path(b.pwd ?? "")
-                    if block.process == nil { block.process = client.foregroundName(b.id) }
+                    if block.process == nil { block.process = processes[b.id] }
                     blocks[b.id] = block
                     statuses[b.id] = b.status
                 }

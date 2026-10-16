@@ -31,10 +31,14 @@ final class RaptorSmokeTests: XCTestCase {
             "command": ["/bin/sh", "-c", "echo raptor-smoke; exec sleep 60"],
         ]))
         let controller = client.open(ghostty, session: created.session)
+        // The view arrives off the main thread.
+        let deadline = Date().addingTimeInterval(15)
+        while controller.tabs.isEmpty && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
         XCTAssertEqual(controller.tabs.count, 1)
 
         // The pane is a surface bound to the block, showing what the block printed.
-        let deadline = Date().addingTimeInterval(15)
         var text = ""
         while Date() < deadline {
             text = controller.surfaceTree.first?.cachedScreenContents.get() ?? ""
@@ -204,13 +208,14 @@ final class RaptorSmokeTests: XCTestCase {
         defer { client.call("session.kill", ["session": created.session]) }
         let controller = client.open(ghostty, session: created.session)
         defer { controller.window?.close() }
-        let first = try XCTUnwrap(controller.surfaceTree.first)
-        _ = controller.newSplit(at: first, direction: .right)
 
         func settle(until done: () -> Bool = { false }) {
             let deadline = Date().addingTimeInterval(5)
             repeat { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } while !done() && Date() < deadline
         }
+        settle { !controller.surfaceTree.isEmpty }
+        let first = try XCTUnwrap(controller.surfaceTree.first)
+        _ = controller.newSplit(at: first, direction: .right)
         settle { Array(controller.surfaceTree).count == 2 }
         let panes = Array(controller.surfaceTree)
         XCTAssertEqual(panes.count, 2)
