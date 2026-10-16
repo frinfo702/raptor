@@ -103,11 +103,17 @@ fn serverRun(init: std.process.Init, args: cli.Args, stderr: *std.Io.Writer) !Ex
     posix.sigaction(.HUP, &act, null);
     posix.sigaction(.PIPE, &act, null);
 
+    // Blocks get this rap on PATH. Raptor runs it from a copy named for its
+    // contents, so the directory follows the app version the server is from.
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const exe_len = std.process.executablePath(init.io, &exe_buf) catch 0;
+
     const server = Server.create(init.gpa, global.io(), .{
         .socket_path = path,
         .env = init.environ_map,
         .idle_timeout_ms = idle_ms,
         .shell_integration = .load(alloc),
+        .bin_dir = std.fs.path.dirname(exe_buf[0..exe_len]),
     }) catch |err| {
         switch (err) {
             error.AlreadyRunning => try stderr.print("rap: server already running on {s}\n", .{path}),
