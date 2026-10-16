@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !u8 {
     const stdout = &stdout_writer.interface;
     const stderr = &stderr_writer.interface;
 
-    const code = if (serverRunArgs(alloc, argv)) |a|
+    const code = if (try serverRunArgs(alloc, init.io, init.environ_map, argv)) |a|
         try serverRun(init, a, stderr)
     else
         try run(alloc, init.io, init.environ_map, argv, stdout, stderr);
@@ -50,7 +50,9 @@ fn run(
         return .usage;
     }
 
-    const cmd = args[0];
+    var bad: []const u8 = "";
+    const words = if (cli.parse(alloc, args, &bad)) |a| a.words else |_| &.{};
+    const cmd = if (words.len > 0) words[0] else "";
     if (std.mem.eql(u8, cmd, "version")) {
         try stdout.print("rap {s}\n", .{options.app_version_string});
         return .ok;
@@ -62,12 +64,18 @@ fn run(
     return cli.run(alloc, io, env, args, stdout, stderr);
 }
 
-/// The parsed arguments if they are `rap server run`.
-fn serverRunArgs(alloc: std.mem.Allocator, argv: []const []const u8) ?cli.Args {
+/// The parsed arguments if they are `rap server run` on this machine.
+fn serverRunArgs(
+    alloc: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    argv: []const []const u8,
+) !?cli.Args {
     var bad: []const u8 = "";
     const a = cli.parse(alloc, argv, &bad) catch return null;
     if (a.words.len != 2 or !std.mem.eql(u8, a.words[0], "server") or
         !std.mem.eql(u8, a.words[1], "run")) return null;
+    if (try cli.sshDestination(alloc, io, env, a.server) != null) return null;
     return a;
 }
 
@@ -142,10 +150,12 @@ fn testRun(args: []const []const u8, expected: ExitCode, out: []const u8, err: [
 
 test "rap version" {
     try testRun(&.{"version"}, .ok, "rap " ++ options.app_version_string ++ "\n", "");
+    try testRun(&.{ "-S", "ssh://box", "version" }, .ok, "rap " ++ options.app_version_string ++ "\n", "");
 }
 
 test "rap help" {
     try testRun(&.{"help"}, .ok, usage, "");
+    try testRun(&.{ "-S", "ssh://box", "help" }, .ok, usage, "");
 }
 
 test "rap without a command is a usage error" {

@@ -42,17 +42,23 @@ pub const usage =
     \\  server stats [--json]               Print memory use per block
     \\
     \\Other:
+    \\  hosts                  List the hosts -S takes by label
     \\  version                Print the build id
     \\  help                   Print this help
     \\
     \\Flags:
     \\  -s <session>  -w <window>  -b <block>   Targets: id, label, position, or id suffix
-    \\  -S <socket>   Server socket (default: $RAP_SERVER, else per user)
+    \\  -S, --server <host|address>
+    \\                Server: a host from rap hosts, ssh://[user@]host[:port],
+    \\                or a socket path (default: $RAP_SERVER, else per user)
     \\  --json        Print results as JSON
     \\
     \\Inside a rap block, RAP_SESSION and RAP_BLOCK are the default targets,
     \\and windows and sessions made with run and new belong under that block.
     \\Set RAP_AUTOSTART=0 to never start a server on demand.
+    \\
+    \\The hosts are the Host aliases in ~/.ssh/config. On a host, the command
+    \\runs as `ssh <host> rap ...`, so rap must be on that host's PATH.
     \\
 ;
 
@@ -78,6 +84,7 @@ const value_flags = std.StaticStringMap(enum { session, window, block, server, i
     .{ "-w", .window },
     .{ "-b", .block },
     .{ "-S", .server },
+    .{ "--server", .server },
     .{ "--idle-timeout", .idle_timeout },
 });
 
@@ -137,7 +144,7 @@ pub fn run(
         }, bad });
         return .usage;
     };
-    var ctx: Ctx = .{ .alloc = alloc, .io = io, .env = env, .args = args, .out = out, .err = err };
+    var ctx: Ctx = .{ .alloc = alloc, .io = io, .env = env, .args = args, .argv = argv, .out = out, .err = err };
     return ctx.dispatch() catch |e| switch (e) {
         error.WriteFailed => error.WriteFailed,
         else => {
@@ -147,11 +154,74 @@ pub fn run(
     };
 }
 
+/// The SSH destination the server names: an `ssh://` address or a host from
+/// `rap hosts`. Null means it names a socket path, which has a `/` or is not
+/// a host.
+pub fn sshDestination(alloc: Allocator, io: std.Io, env: *const EnvMap, flag: ?[]const u8) !?[]const u8 {
+    const s = flag orelse env.get("RAP_SERVER") orelse return null;
+    if (std.mem.startsWith(u8, s, "ssh://")) return s;
+    if (s.len == 0 or std.mem.indexOfScalar(u8, s, '/') != null) return null;
+    for (try hosts(alloc, io, env)) |h| if (std.mem.eql(u8, h, s)) return s;
+    return null;
+}
+
+/// The Host aliases in `~/.ssh/config`.
+fn hosts(alloc: Allocator, io: std.Io, env: *const EnvMap) ![]const []const u8 {
+    const home = env.get("HOME") orelse return &.{};
+    const path = try std.fs.path.join(alloc, &.{ home, ".ssh", "config" });
+    const text = std.Io.Dir.cwd().readFileAlloc(io, path, alloc, .limited(1 << 20)) catch return &.{};
+    return parseHosts(alloc, text);
+}
+
+// ponytail: top-level Host lines only; Include and Match aren't followed.
+fn parseHosts(alloc: Allocator, text: []const u8) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeAny(u8, line, " \t\r=");
+        const key = words.next() orelse continue;
+        if (!std.ascii.eqlIgnoreCase(key, "host")) continue;
+        // Patterns match many hosts, so they are no host's label.
+        while (words.next()) |w| if (std.mem.indexOfAny(u8, w, "*?!") == null) try list.append(alloc, w);
+    }
+    return list.items;
+}
+
+/// `argv` as a command for the remote shell: `rap` and the arguments, quoted,
+/// less the server, since the remote rap uses its own.
+fn remoteCommand(alloc: Allocator, argv: []const []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(alloc, "rap");
+    var i: usize = 0;
+    var after_dashes = false;
+    while (i < argv.len) : (i += 1) {
+        const a = argv[i];
+        if (!after_dashes) {
+            if (std.mem.eql(u8, a, "--")) after_dashes = true;
+            if (value_flags.get(a)) |f| {
+                i += 1;
+                if (f == .server) continue;
+                try appendQuoted(alloc, &out, a);
+                if (i == argv.len) break;
+            }
+        }
+        try appendQuoted(alloc, &out, argv[i]);
+    }
+    return out.items;
+}
+
+fn appendQuoted(alloc: Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    try out.appendSlice(alloc, " '");
+    for (s) |ch| if (ch == '\'') try out.appendSlice(alloc, "'\\''") else try out.append(alloc, ch);
+    try out.append(alloc, '\'');
+}
+
 const Ctx = struct {
     alloc: Allocator,
     io: std.Io,
     env: *const EnvMap,
     args: Args,
+    argv: []const []const u8,
     out: *Writer,
     err: *Writer,
     fd: posix.fd_t = -1,
@@ -161,6 +231,11 @@ const Ctx = struct {
 
     fn dispatch(self: *Ctx) Error!ExitCode {
         const words = self.args.words;
+        const local = words.len > 0 and std.mem.eql(u8, words[0], "hosts");
+        if (!local) if (try sshDestination(self.alloc, self.io, self.env, self.args.server)) |dest| {
+            const argv = [_][]const u8{ "ssh", "--", dest, try remoteCommand(self.alloc, self.argv) };
+            return std.process.replace(self.io, .{ .argv = &argv });
+        };
         if (words.len == 0) {
             try self.err.writeAll(usage);
             return .usage;
@@ -194,6 +269,7 @@ const Ctx = struct {
             session,
             block,
             server,
+            hosts,
         };
         const which = std.meta.stringToEnum(Cmd, cmd) orelse {
             try self.err.print("rap: unknown command '{s}'\n\n" ++ usage, .{cmd});
@@ -216,6 +292,7 @@ const Ctx = struct {
             .session => self.inspect("session"),
             .block => if (words.len > 1 and std.mem.eql(u8, words[1], "call")) self.blockCall() else self.inspect("block"),
             .server => self.server(),
+            .hosts => self.listHosts(),
         };
     }
 
@@ -645,6 +722,15 @@ const Ctx = struct {
         for (evs) |e| try self.out.print("  {s}\n", .{e.string});
     }
 
+    fn listHosts(self: *Ctx) Error!ExitCode {
+        const list = try hosts(self.alloc, self.io, self.env);
+        if (self.args.json) {
+            try std.json.Stringify.value(.{ .hosts = list }, .{}, self.out);
+            try self.out.writeByte('\n');
+        } else for (list) |h| try self.out.print("{s}\n", .{h});
+        return .ok;
+    }
+
     fn server(self: *Ctx) Error!ExitCode {
         const words = self.args.words;
         const sub = if (words.len == 2) words[1] else "";
@@ -842,4 +928,78 @@ test "rap cli: key names" {
     for ([_][]const u8{ "Enter", "C-c", "M-x", "Up", "a", "F5" }) |k| try encodeKey(alloc, &out, k);
     try std.testing.expectEqualStrings("\r\x03\x1bx\x1b[Aa\x1b[15~", out.items);
     try std.testing.expectError(error.UnknownKey, encodeKey(alloc, &out, "Nope"));
+}
+
+test "rap cli: ssh hosts" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const list = try parseHosts(arena.allocator(),
+        \\Host *
+        \\  User me
+        \\host studio lab=box
+        \\  HostName studio.example.com
+        \\Host *.ts.net !bad 100.*
+        \\# Host commented
+    );
+    try std.testing.expectEqual(3, list.len);
+    try std.testing.expectEqualStrings("studio", list[0]);
+    try std.testing.expectEqualStrings("lab", list[1]);
+    try std.testing.expectEqualStrings("box", list[2]);
+}
+
+test "rap cli: ssh destination" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env: EnvMap = .init(alloc);
+    try env.put("HOME", "/nonexistent");
+    try std.testing.expectEqual(null, try sshDestination(alloc, std.testing.io, &env, null));
+    try std.testing.expectEqual(null, try sshDestination(alloc, std.testing.io, &env, "/tmp/s.sock"));
+    try std.testing.expectEqual(null, try sshDestination(alloc, std.testing.io, &env, "s.sock"));
+    try std.testing.expectEqualStrings("ssh://me@box:22", (try sshDestination(alloc, std.testing.io, &env, "ssh://me@box:22")).?);
+    try env.put("RAP_SERVER", "ssh://box");
+    try std.testing.expectEqualStrings("ssh://box", (try sshDestination(alloc, std.testing.io, &env, null)).?);
+    try std.testing.expectEqual(null, try sshDestination(alloc, std.testing.io, &env, "/tmp/s.sock"));
+}
+
+test "rap cli: hosts runs locally under RAP_SERVER" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, ".ssh");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".ssh/config", .data = "Host studio\n" });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = buf[0..try tmp.dir.realPathFile(std.testing.io, ".", &buf)];
+    var env: EnvMap = .init(alloc);
+    try env.put("HOME", home);
+    try env.put("RAP_SERVER", "studio");
+    var out: Writer.Allocating = .init(alloc);
+    var err: Writer.Allocating = .init(alloc);
+    try std.testing.expectEqual(.ok, try run(alloc, std.testing.io, &env, &.{"hosts"}, &out.writer, &err.writer));
+    try std.testing.expectEqualStrings("studio\n", out.written());
+}
+
+test "rap cli: unreadable ssh config has no hosts" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, ".ssh/config");
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const home = buf[0..try tmp.dir.realPathFile(std.testing.io, ".", &buf)];
+    var env: EnvMap = .init(alloc);
+    try env.put("HOME", home);
+    try std.testing.expectEqual(null, try sshDestination(alloc, std.testing.io, &env, "s.sock"));
+}
+
+test "rap cli: remote command drops the server and quotes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectEqualStrings(
+        "rap 'send' '-s' 'a b' 'it'\\''s' '--' '-S' 'x'",
+        try remoteCommand(arena.allocator(), &.{ "-S", "studio", "send", "-s", "a b", "--server", "y", "it's", "--", "-S", "x" }),
+    );
 }
