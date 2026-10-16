@@ -32,6 +32,7 @@ struct RaptorSidebarTests {
             switch row {
             case .session(let id, _, _): "#" + id
             case .tab(let t, let branch): String(repeating: "  ", count: branch.depth) + t.id
+            case .more(_, _, let branch): String(repeating: "  ", count: branch.depth) + "…"
             }
         }
     }
@@ -153,6 +154,39 @@ struct RaptorSidebarTests {
             tab("leaf", "a", parent: "block:main"),
         ])]
         #expect(outline(Model.rows(sessions, activity: false)) == ["#a", "wt", "main", "  leaf"])
+    }
+
+    @Test func tabsDeeperThanThreeLevelsCollapseIntoOneEllipsisRow() {
+        let sessions = [Model.Session(id: "a", label: "a", tabs: [
+            tab("lead", "a"),
+            tab("sub", "a", parent: "block:lead"),
+            tab("subsub", "a", parent: "block:sub"),
+            tab("deep", "a", parent: "block:subsub"),
+            tab("deep2", "a", parent: "block:subsub"),
+            tab("deeper", "a", parent: "block:deep"),
+        ])]
+        let rows = Model.rows(sessions, activity: false)
+        // Everything under subsub is hidden behind one "…" whose elbow ends at that row.
+        #expect(outline(rows) == ["#a", "lead", "  sub", "    subsub", "      …"])
+        guard case .more(let id, let hidden, let branch) = rows.last else {
+            Issue.record("expected a trailing … row")
+            return
+        }
+        #expect(id == "subsub")
+        #expect(branch == Model.Branch(guides: [false, false], last: true, isChild: true))
+        // The … row knows every tab it hides, so it can stand in for the active one.
+        #expect(hidden.map(\.id) == ["deep", "deeper", "deep2"])
+        #expect(Set(rows.map(\.id)).count == rows.count)
+    }
+
+    @Test func activityModeCapsDepthTheSameWay() {
+        let sessions = [Model.Session(id: "a", label: "a", tabs: [
+            tab("lead", "a", agent: true),
+            tab("sub", "a", status: "working", parent: "block:lead"),
+            tab("subsub", "a", status: "working", parent: "block:sub"),
+            tab("deep", "a", status: "working", parent: "block:subsub"),
+        ])]
+        #expect(outline(Model.rows(sessions, activity: true)) == ["#a", "lead", "  sub", "    subsub", "      …"])
     }
 
     @Test func agesReadAsRexShowsThem() {
