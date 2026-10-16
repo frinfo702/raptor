@@ -45,6 +45,7 @@ struct RaptorPane: View {
                 RaptorPaneHeader(
                     block: block,
                     single: controller.isSinglePane,
+                    light: tokens.isLight,
                     split: { controller.split(surface, $0) },
                     zoom: { controller.zoom(surface) },
                     close: { controller.close(surface) })
@@ -82,13 +83,15 @@ struct RaptorPaneHeader: View {
     let block: RaptorController.Block
     /// The pane is its tab's only one, so it can't be closed from here.
     let single: Bool
+    /// Picks the program logo's light-theme art.
+    let light: Bool
     let split: (SplitTree<Ghostty.SurfaceView>.NewDirection) -> Void
     let zoom: () -> Void
     let close: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
-            RaptorProgramIcon(icon: block.program.icon, size: 16)
+            RaptorProgramIcon(icon: block.program.icon, size: 16, light: light)
                 .frame(width: 16, height: 16)
             Text(block.headerTitle)
                 .font(.system(size: 13, weight: .semibold))

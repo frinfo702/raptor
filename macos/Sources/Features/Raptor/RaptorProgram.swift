@@ -2,13 +2,14 @@ import SwiftUI
 
 /// How Raptor shows a pane's foreground program: a friendly name and an icon, drawn
 /// plain in pane headers and, in tabs, as the program's card or else on a tinted tile.
-///
-/// ponytail: SF Symbols and text glyphs stand in for program logos in pane headers and
-/// on tiles for programs without a card.
+/// Programs without a logo in RaptorLogos.xcassets get an SF Symbol or a text glyph.
 struct RaptorProgram: Equatable {
     enum Icon: Equatable {
         case symbol(String)
         case text(String)
+        /// A logo drawn black for light themes and white for dark ones: imagesets
+        /// "logo-<name>-light" and "logo-<name>-dark" in RaptorLogos.xcassets.
+        case logo(String)
     }
 
     let name: String
@@ -55,26 +56,33 @@ struct RaptorProgram: Equatable {
 
     /// Programs by process name.
     private static let known: [String: RaptorProgram] = [
-        "nvim": .init(name: "Neovim", icon: .text("N"), tile: rgb(0x1F6F68), glyph: rgb(0x9BE3C8)),
-        "vim": .init(name: "Vim", icon: .text("V"), tile: rgb(0x1F5F2E), glyph: rgb(0x9BE39F)),
+        "nvim": .init(name: "Neovim", icon: .logo("neovim"), tile: rgb(0x1F6F68), glyph: rgb(0x9BE3C8)),
+        "vim": .init(name: "Vim", icon: .logo("vim"), tile: rgb(0x1F5F2E), glyph: rgb(0x9BE39F)),
         "hx": .init(name: "Helix", icon: .symbol("chevron.left.forwardslash.chevron.right"), tile: rgb(0x4B3A6E), glyph: rgb(0xD2C2F5)),
-        "node": .init(name: "Node", icon: .symbol("hexagon.fill"), tile: rgb(0x3A4A3A), glyph: rgb(0xC9D1C9)),
+        "node": .init(name: "Node", icon: .logo("nodejs"), tile: rgb(0x3A4A3A), glyph: rgb(0xC9D1C9)),
         "bun": .init(name: "Bun", icon: .symbol("circle.dotted"), tile: rgb(0xF2E8DC), glyph: rgb(0x3A3028)),
         "deno": .init(name: "Deno", icon: .symbol("circle.fill"), tile: rgb(0x2A2A2A), glyph: rgb(0xEDEDED)),
-        "python": .init(name: "Python", icon: .symbol("chevron.left.forwardslash.chevron.right"), tile: rgb(0x2F4F7A), glyph: rgb(0xF5D76E)),
-        "python3": .init(name: "Python", icon: .symbol("chevron.left.forwardslash.chevron.right"), tile: rgb(0x2F4F7A), glyph: rgb(0xF5D76E)),
+        "python": .init(name: "Python", icon: .logo("python"), tile: rgb(0x2F4F7A), glyph: rgb(0xF5D76E)),
+        "python3": .init(name: "Python", icon: .logo("python"), tile: rgb(0x2F4F7A), glyph: rgb(0xF5D76E)),
         "lazygit": .init(name: "Git Changes", icon: .symbol("plusminus.circle"), tile: rgb(0x4A3A2A), glyph: rgb(0xF0B27A)),
         "git": .init(name: "Git", icon: .symbol("arrow.triangle.branch"), tile: rgb(0x4A3A2A), glyph: rgb(0xF0B27A)),
         "btop": .init(name: "btop", icon: .text("B"), tile: rgb(0x7A1E1E), glyph: rgb(0xFF8A80)),
         "htop": .init(name: "htop", icon: .symbol("chart.bar.fill"), tile: rgb(0x2E5A2E), glyph: rgb(0x9BE39F)),
         "top": .init(name: "top", icon: .symbol("chart.bar.fill"), tile: rgb(0x3A3A3A), glyph: rgb(0xDDDDDD)),
+        "gh": .init(name: "GitHub", icon: .logo("github"), tile: rgb(0x24292F), glyph: rgb(0xFFFFFF)),
+        "docker": .init(name: "Docker", icon: .logo("docker"), tile: rgb(0x1D63ED), glyph: rgb(0xFFFFFF)),
+        "kubectl": .init(name: "Kubernetes", icon: .logo("kubernetes"), tile: rgb(0x326CE5), glyph: rgb(0xFFFFFF)),
+        "k9s": .init(name: "k9s", icon: .logo("kubernetes"), tile: rgb(0x326CE5), glyph: rgb(0xFFFFFF)),
+        "aws": .init(name: "AWS", icon: .logo("aws"), tile: rgb(0x232F3E), glyph: rgb(0xFF9900)),
+        "cloudflared": .init(name: "Cloudflare Tunnel", icon: .logo("cloudflare"), tile: rgb(0xF38020), glyph: rgb(0xFFFFFF)),
         "ssh": .init(name: "SSH", icon: .symbol("network"), tile: rgb(0x2F4F7A), glyph: rgb(0xBFD8F5)),
         "less": .init(name: "less", icon: .symbol("doc.text"), tile: rgb(0x3A3A3A), glyph: rgb(0xDDDDDD)),
         "man": .init(name: "Manual", icon: .symbol("book"), tile: rgb(0x3A3A3A), glyph: rgb(0xDDDDDD)),
-        "claude": .init(name: "Claude", icon: .symbol("asterisk"), tile: rgb(0xD9774B), glyph: rgb(0xFFFFFF), isAgent: true),
-        "codex": .init(name: "Codex", icon: .symbol("circle.hexagongrid"), tile: rgb(0xF2F2F2), glyph: rgb(0x111111), isAgent: true),
-        "opencode": .init(name: "OpenCode", icon: .symbol("sparkle"), tile: rgb(0x2A2A2A), glyph: rgb(0xEDEDED), isAgent: true),
-        "cursor-agent": .init(name: "Cursor", icon: .symbol("cursorarrow"), tile: rgb(0x111111), glyph: rgb(0xEDEDED), isAgent: true),
+        "claude": .init(name: "Claude", icon: .logo("claude"), tile: rgb(0xD9774B), glyph: rgb(0xFFFFFF), isAgent: true),
+        "codex": .init(name: "Codex", icon: .logo("openai"), tile: rgb(0xF2F2F2), glyph: rgb(0x111111), isAgent: true),
+        "opencode": .init(name: "OpenCode", icon: .logo("opencode"), tile: rgb(0x2A2A2A), glyph: rgb(0xEDEDED), isAgent: true),
+        "cursor-agent": .init(name: "Cursor", icon: .logo("cursor"), tile: rgb(0x111111), glyph: rgb(0xEDEDED), isAgent: true),
+        "copilot": .init(name: "Copilot", icon: .logo("copilot"), tile: rgb(0x24292F), glyph: rgb(0xFFFFFF), isAgent: true),
         "gemini": .init(name: "Gemini", icon: .symbol("sparkle"), tile: rgb(0x2F4F7A), glyph: rgb(0xBFD8F5), isAgent: true),
     ]
 
@@ -92,7 +100,8 @@ struct RaptorProgram: Equatable {
     static func identify(_ process: String?) -> RaptorProgram? {
         guard let process, !process.isEmpty else { return nil }
         if shells.contains(process) {
-            return .init(name: process, icon: shell.icon, tile: shell.tile, glyph: shell.glyph, card: shell.card)
+            let icon: Icon = ["bash", "fish"].contains(process) ? .logo(process) : shell.icon
+            return .init(name: process, icon: icon, tile: shell.tile, glyph: shell.glyph, card: shell.card)
         }
         var program = known[process] ?? .init(name: process, icon: .symbol("terminal"), tile: rgb(0x3A3A3A), glyph: rgb(0xDDDDDD))
         program.card = cards[process]
@@ -113,6 +122,10 @@ struct RaptorProgram: Equatable {
 struct RaptorProgramIcon: View {
     let icon: RaptorProgram.Icon
     let size: CGFloat
+    /// Picks a logo's light-theme art.
+    let light: Bool
+    /// Draws a logo in the foreground style, as on a tile, instead of black or white.
+    var tinted = false
 
     var body: some View {
         switch icon {
@@ -122,6 +135,14 @@ struct RaptorProgramIcon: View {
         case .text(let text):
             Text(text)
                 .font(.system(size: text.count > 1 ? size * 0.55 : size * 0.8, weight: .heavy, design: .monospaced))
+        case .logo(let name):
+            if let image = NSImage(named: "logo-\(name)-\(light ? "light" : "dark")") {
+                Image(nsImage: image)
+                    .renderingMode(tinted ? .template : .original)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: size, height: size)
+            }
         }
     }
 }
@@ -141,7 +162,7 @@ struct RaptorCardFace: View {
                 .scaledToFit()
                 .frame(height: height)
         } else {
-            RaptorProgramIcon(icon: program.icon, size: height * 2 / 3)
+            RaptorProgramIcon(icon: program.icon, size: height * 2 / 3, light: light, tinted: true)
                 .foregroundStyle(program.glyph)
                 .frame(width: height, height: height)
                 .background(RoundedRectangle(cornerRadius: height * 5 / 18).fill(program.tile))
