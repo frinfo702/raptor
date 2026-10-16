@@ -5,8 +5,7 @@
 #
 # Downloads the rap release tarball for this OS and arch, verifies it
 # against the release's rap-SHA256SUMS, and installs bin/rap and
-# share/ghostty/shell-integration under $RAP_PREFIX (default ~/.local).
-# Set RAP_VERSION to a release tag (raptor-vX.Y.Z) to pin a version.
+# share/ghostty/shell-integration under ~/.local.
 set -eu
 
 repo=frinfo702/raptor
@@ -17,13 +16,7 @@ fail() {
 }
 
 fetch() {
-  if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -o "$2" "$1"
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$2" "$1"
-  else
-    fail "need curl or wget"
-  fi || fail "could not download $1"
+  curl -fsSL -o "$2" "$1" || fail "could not download $1"
 }
 
 sha256() {
@@ -56,12 +49,8 @@ main() {
   fi
   asset="rap-$os-$arch.tar.gz"
 
-  if [ -n "${RAP_VERSION:-}" ]; then
-    base="https://github.com/$repo/releases/download/$RAP_VERSION"
-  else
-    base="https://github.com/$repo/releases/latest/download"
-  fi
-  prefix="${RAP_PREFIX:-$HOME/.local}"
+  base="https://github.com/$repo/releases/latest/download"
+  prefix="$HOME/.local"
 
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/install-rap.XXXXXX")"
   trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -69,7 +58,7 @@ main() {
   echo "install-rap: downloading $base/$asset"
   fetch "$base/$asset" "$tmp/$asset"
   fetch "$base/rap-SHA256SUMS" "$tmp/rap-SHA256SUMS"
-  want="$(awk -v f="$asset" '$2 == f || $2 == "*" f {print $1}' "$tmp/rap-SHA256SUMS")"
+  want="$(awk -v f="$asset" '$2 == f {print $1}' "$tmp/rap-SHA256SUMS")"
   [ -n "$want" ] || fail "rap-SHA256SUMS has no entry for $asset"
   got="$(sha256 "$tmp/$asset")"
   [ "$got" = "$want" ] || fail "checksum mismatch for $asset: expected $want, got $got"

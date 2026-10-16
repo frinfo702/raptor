@@ -51,9 +51,7 @@ curl -fsSL https://github.com/frinfo702/raptor/releases/latest/download/install-
 ```
 
 It verifies the download's checksum and installs `rap` into
-`~/.local/bin`. Set `RAP_PREFIX` to install elsewhere, or `RAP_VERSION`
-to a release tag to pin a version, e.g.
-`curl -fsSL ... | RAP_VERSION=raptor-vX.Y.Z sh`.
+`~/.local/bin`.
 
 ## Documentation
 
