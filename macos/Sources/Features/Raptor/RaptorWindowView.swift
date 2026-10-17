@@ -221,23 +221,30 @@ extension ButtonStyle where Self == RaptorButtonStyle {
 
 extension View {
     /// The hover feedback of ``RaptorButtonStyle``, for controls that aren't a `Button`.
-    func raptorHover() -> some View { modifier(RaptorHover()) }
+    /// `tint: false` keeps only the plate, for system-styled buttons whose bezel the tint would recolor.
+    func raptorHover(tint: Bool = true) -> some View { modifier(RaptorHover(tint: tint)) }
 }
 
 private struct RaptorHover: ViewModifier {
+    let tint: Bool
     @Environment(\.isEnabled) private var enabled
     @State private var hovering = false
 
     func body(content: Content) -> some View {
         let on = hovering && enabled
-        content
-            // Lifts the label's own `.secondary` styles without touching anything else.
-            .foregroundStyle(.primary, on ? HierarchicalShapeStyle.primary : .secondary)
-            // The plate reaches past small glyphs without moving them.
-            .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(on ? Color.primary.opacity(0.08) : .clear)
-                .padding(-3))
-            .onHover { hovering = $0 }
+        Group {
+            if tint {
+                // Lifts the label's own `.secondary` styles without touching anything else.
+                content.foregroundStyle(.primary, on ? HierarchicalShapeStyle.primary : .secondary)
+            } else {
+                content
+            }
+        }
+        // The plate reaches past small glyphs without moving them.
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(on ? Color.primary.opacity(0.08) : .clear)
+            .padding(-3))
+        .onHover { hovering = $0 }
     }
 }
 

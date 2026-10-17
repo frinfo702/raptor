@@ -43,7 +43,7 @@ struct RaptorSettingsView: View {
                 Button("Open Config File…") {
                     (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()
                 }
-                .raptorHover()
+                .raptorHover(tint: false)
             }
         }
         .formStyle(.grouped)
