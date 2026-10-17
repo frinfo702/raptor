@@ -69,7 +69,10 @@ pub const usage =
     \\A server run with --tailnet also listens on this node's tailnet address,
     \\on port 7277 or --port, and stays up when idle. It lets in the nodes of
     \\this node's Tailscale user, and of the users --allow names as login
-    \\names (me@github,pal@github). They get your shell.
+    \\names (me@github,pal@github). They get your shell. It trusts every
+    \\process of those users on every one of their nodes, so do not use it
+    \\on a machine shared with other users. Clients on this machine use the
+    \\Unix socket; the tailnet listener refuses them.
     \\
 ;
 
@@ -186,7 +189,7 @@ pub fn sshDestination(alloc: Allocator, io: std.Io, env: *const EnvMap, flag: ?[
 /// the default port.
 // ponytail: a thread per online peer, fine for a personal tailnet; poll
 // nonblocking sockets instead if tailnets get large.
-fn tailnetHosts(alloc: Allocator, io: std.Io) ![]const []const u8 {
+fn tailnetHosts(alloc: Allocator, io: std.Io) anyerror![]const []const u8 {
     const st = tailscale.status(alloc, io) catch return &.{};
     const found = try alloc.alloc(bool, st.peers.len);
     @memset(found, false);
@@ -280,6 +283,7 @@ const Ctx = struct {
     /// The server is a tailnet node, where this machine's paths, variables
     /// and blocks mean nothing.
     remote: bool = false,
+    tailnet_hosts: *const fn (Allocator, std.Io) anyerror![]const []const u8 = &tailnetHosts,
 
     const Error = anyerror;
 
@@ -799,7 +803,7 @@ const Ctx = struct {
 
     fn listHosts(self: *Ctx) Error!ExitCode {
         const list = try hosts(self.alloc, self.io, self.env);
-        const tailnet = try tailnetHosts(self.alloc, self.io);
+        const tailnet = try self.tailnet_hosts(self.alloc, self.io);
         if (self.args.json) {
             try std.json.Stringify.value(.{ .hosts = list, .tailnet = tailnet }, .{}, self.out);
             try self.out.writeByte('\n');
@@ -814,7 +818,24 @@ const Ctx = struct {
             if (self.remote) return self.usageError("a tailnet node starts its own server: rap server start --tailnet", .{});
             const path = try self.socketPath();
             if (protocol.connect(path)) |fd| {
-                _ = c.close(fd);
+                self.fd = fd;
+                defer _ = c.close(fd);
+                if (self.args.tailnet) {
+                    const r = switch (try self.call("server.status", .{})) {
+                        .result => |v| v,
+                        .failed => |code| return code,
+                    };
+                    const at = str(r, "tailnet");
+                    var want: u16 = tailscale.default_port;
+                    if (self.args.port) |p| want = std.fmt.parseInt(u16, p, 10) catch
+                        return self.usageError("invalid --port '{s}'", .{p});
+                    const colon = std.mem.lastIndexOfScalar(u8, at, ':') orelse at.len;
+                    const port = std.fmt.parseInt(u16, at[@min(colon + 1, at.len)..], 10) catch 0;
+                    if (port != want) {
+                        try self.err.print("rap: the server running on {s} is not on the tailnet at port {d}; stop it and start it again with --tailnet\n", .{ path, want });
+                        return .fail;
+                    }
+                }
                 try self.out.print("server already running on {s}\n", .{path});
                 return .ok;
             } else |_| {}
@@ -1056,9 +1077,24 @@ test "rap cli: hosts runs locally under RAP_SERVER" {
     try env.put("RAP_SERVER", "studio");
     var out: Writer.Allocating = .init(alloc);
     var err: Writer.Allocating = .init(alloc);
-    try std.testing.expectEqual(.ok, try run(alloc, std.testing.io, &env, &.{"hosts"}, &out.writer, &err.writer));
-    // Then any tailnet nodes running rap.
-    try std.testing.expect(std.mem.startsWith(u8, out.written(), "studio\n"));
+    var bad: []const u8 = "";
+    const argv: []const []const u8 = &.{"hosts"};
+    var ctx: Ctx = .{
+        .alloc = alloc,
+        .io = std.testing.io,
+        .env = &env,
+        .args = try parse(alloc, argv, &bad),
+        .argv = argv,
+        .out = &out.writer,
+        .err = &err.writer,
+        .tailnet_hosts = &struct {
+            fn f(_: Allocator, _: std.Io) anyerror![]const []const u8 {
+                return &.{"pi"};
+            }
+        }.f,
+    };
+    try std.testing.expectEqual(.ok, try ctx.dispatch());
+    try std.testing.expectEqualStrings("studio\npi\n", out.written());
 }
 
 test "rap cli: unreadable ssh config has no hosts" {

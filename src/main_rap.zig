@@ -99,7 +99,10 @@ fn serverRun(init: std.process.Init, args: cli.Args, stderr: *std.Io.Writer) !Ex
         .allow = allow: {
             var list: std.ArrayList([]const u8) = .empty;
             var it = std.mem.tokenizeScalar(u8, args.allow orelse "", ',');
-            while (it.next()) |login| try list.append(alloc, login);
+            while (it.next()) |login| {
+                const l = std.mem.trim(u8, login, " \t");
+                if (l.len > 0) try list.append(alloc, l);
+            }
             break :allow list.items;
         },
     } else null;

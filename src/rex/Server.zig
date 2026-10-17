@@ -241,6 +241,7 @@ listen_c: xev.Completion = .{},
 tailnet_fd: posix.fd_t = -1,
 tailnet_c: xev.Completion = .{},
 tailnet_addr: ?[]u8 = null,
+tailnet_ip: [4]u8 = @splat(0),
 /// The Tailscale user whose nodes may connect: this node's, unless it is
 /// tagged.
 tailnet_user: ?i64 = null,
@@ -328,6 +329,7 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
     var tailnet_addr: ?[]u8 = null;
     errdefer if (tailnet_addr) |a| alloc.free(a);
     var tailnet_user: ?i64 = null;
+    var tailnet_ip: [4]u8 = @splat(0);
     if (opts.tailnet) |t| {
         var arena: std.heap.ArenaAllocator = .init(alloc);
         defer arena.deinit();
@@ -336,6 +338,7 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
         tailnet_fd = try protocol.listenTcp(where);
         tailnet_addr = try std.fmt.allocPrint(alloc, "{f}", .{where});
         tailnet_user = st.self.user;
+        tailnet_ip = st.self.ip;
         if (tailnet_user == null and t.allow.len == 0)
             log.warn("this node is tagged, so only users named by --allow may connect over the tailnet", .{});
     }
@@ -361,6 +364,7 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
         .tailnet_fd = tailnet_fd,
         .tailnet_addr = tailnet_addr,
         .tailnet_user = tailnet_user,
+        .tailnet_ip = tailnet_ip,
         .tailnet_allow = if (opts.tailnet) |t| t.allow else &.{},
         .timer = try .init(),
         .compress_timer = try .init(),
@@ -628,7 +632,13 @@ fn tailnetPrincipal(self: *Server, fd: posix.fd_t) ?Principal {
     var arena: std.heap.ArenaAllocator = .init(self.alloc);
     defer arena.deinit();
     const alloc = arena.allocator();
-    const addr = std.fmt.allocPrint(alloc, "{f}", .{protocol.peerAddress(fd) orelse return null}) catch return null;
+    const peer = protocol.peerAddress(fd) orelse return null;
+    const addr = std.fmt.allocPrint(alloc, "{f}", .{peer}) catch return null;
+    if (fromSelf(self.tailnet_ip, peer)) {
+        log.warn("rejecting tailnet client {s}: it is on this machine", .{addr});
+        refuse(fd, "clients on this machine use the Unix socket, not the tailnet", .{});
+        return null;
+    }
     const node = tailscale.whois(alloc, self.io, addr) catch |err| {
         log.warn("rejecting tailnet client {s}: whois failed: {t}", .{ addr, err });
         refuse(fd, "the server could not ask Tailscale who {s} is", .{addr});
@@ -657,6 +667,12 @@ fn allowed(owner: ?i64, allow: []const []const u8, node: tailscale.Node) bool {
     return false;
 }
 
+/// Whether a tailnet client connects from this node's own address, so it
+/// may be any local user; local clients use the Unix socket instead.
+fn fromSelf(self_ip: [4]u8, peer: std.Io.net.Ip4Address) bool {
+    return std.mem.eql(u8, &self_ip, &peer.bytes);
+}
+
 /// Tell a client it may not connect: `{"event":"refused","message":...}`.
 fn refuse(fd: posix.fd_t, comptime fmt: []const u8, args: anytype) void {
     var msg_buf: [512]u8 = undefined;
@@ -679,6 +695,9 @@ test "rex Server: who may connect over the tailnet" {
     // A tagged server has no user of its own.
     try testing.expect(!allowed(null, &.{}, mine));
     try testing.expect(allowed(null, &.{"me@github"}, mine));
+    // Another local user reaching the listener from this node is refused.
+    try testing.expect(fromSelf(mine.ip, .{ .bytes = mine.ip, .port = 50000 }));
+    try testing.expect(!fromSelf(mine.ip, .{ .bytes = theirs.ip, .port = 50000 }));
 
     // A refused client hears why.
     var fds: [2]c.fd_t = undefined;
