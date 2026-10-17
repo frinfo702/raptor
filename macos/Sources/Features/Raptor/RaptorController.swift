@@ -587,8 +587,8 @@ class RaptorController: BaseTerminalController {
     /// Show a tailnet machine's sessions here, connecting to its rap server first. With
     /// no server there that lets us in, say how to start one instead.
     func open(_ peer: RaptorClient.Peer) {
-        guard peer.rap == .running else { return promptInstall(peer) }
         if let known = RaptorClient.Servers.shared.client(host: peer.dns) { return showNewest(on: known) }
+        guard peer.rap != .refused else { return promptInstall(peer) }
         DispatchQueue.global().async { [weak self] in
             let connection = RaptorClient.dial(host: peer.dns)
             DispatchQueue.main.async {

@@ -378,8 +378,9 @@ final class RaptorClient: Identifiable {
         // Tests drive the client themselves.
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
               let shared else { return fallback() }
-        if !shared.controllers.isEmpty {
-            shared.controllers.forEach { $0.showWindow(nil) }
+        let windows = Servers.shared.clients.flatMap(\.controllers)
+        if !windows.isEmpty {
+            windows.forEach { $0.showWindow(nil) }
             return
         }
         guard !shared.opening else { return }
