@@ -53,8 +53,9 @@ class RaptorController: BaseTerminalController {
     /// The last view the server sent.
     private var view: SessionView?
 
-    /// The session whose panes are bound, which a switch replaces once its view arrives.
-    private var shown: String
+    /// The session last asked for by `switchSession`, so an earlier switch's view that
+    /// arrives late is dropped.
+    private var switching: String?
 
     /// Blocks by id, from the view and the server's events.
     @Published private(set) var blocks: [String: Block] = [:]
@@ -68,7 +69,6 @@ class RaptorController: BaseTerminalController {
         self.client = client
         self.stream = stream
         self.session = session
-        self.shown = session
         super.init(ghostty, surfaceTree: .init())
 
         let window = NSWindow(
@@ -213,10 +213,6 @@ class RaptorController: BaseTerminalController {
     }
 
     private func apply(_ view: SessionView, processes: [String: String]) {
-        if shown != session {
-            unbindAll()
-            shown = session
-        }
         let focusedBefore = self.view?.windows.first { $0.id == view.active_window }?.focused_block
         self.view = view
         label = view.label
@@ -526,11 +522,17 @@ class RaptorController: BaseTerminalController {
 
     /// Show another session in this window.
     func switchSession(to id: String) {
+        switching = id
         guard id != session else { return }
-        let old = session
-        session = id
-        client.switched(self, from: old)
-        refresh()
+        client.request({ $0.view(id, known: []) }, done: { [weak self] fetched in
+            guard let self, let fetched, self.switching == id,
+                  self.client.controllers.contains(where: { $0 === self }) else { return }
+            self.unbindAll()
+            let old = self.session
+            self.session = id
+            self.client.switched(self, from: old)
+            self.apply(fetched.view, processes: fetched.processes)
+        })
     }
 
     /// Make a session and show it here.
