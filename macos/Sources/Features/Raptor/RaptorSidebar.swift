@@ -620,6 +620,8 @@ struct RaptorSidebarRow: View {
     let tokens: ThemeTokens
     let select: () -> Void
 
+    @State private var hovering = false
+
     /// The selection pill and the eye's circle lift the chrome as the tab strip's pill
     /// does, so they stay translucent over Blended and Glass.
     static func raised(_ tokens: ThemeTokens) -> Color {
@@ -666,8 +668,11 @@ struct RaptorSidebarRow: View {
         .padding(.leading, 10 + CGFloat(branch.depth) * RaptorSidebar.indent)
         .padding(.trailing, 14)
         .frame(maxWidth: .infinity, minHeight: height - 3, maxHeight: height - 3, alignment: .leading)
-        .background { Self.pill(selected: selected, height: height, activity: activity, tokens: tokens) }
+        .background {
+            Self.pill(selected: selected, hovering: hovering, height: height, activity: activity, tokens: tokens)
+        }
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
         .padding(.horizontal, RaptorSidebar.selectionInset)
         .frame(height: height)
         .background(alignment: .leading) {
@@ -682,11 +687,13 @@ struct RaptorSidebarRow: View {
     }
 
     @ViewBuilder
-    static func pill(selected: Bool, height: CGFloat, activity: Bool, tokens: ThemeTokens) -> some View {
+    static func pill(selected: Bool, hovering: Bool, height: CGFloat, activity: Bool, tokens: ThemeTokens) -> some View {
+        let shape = RoundedRectangle(cornerRadius: activity ? 15 : (height - 3) / 2, style: .continuous)
         if selected {
-            let shape = RoundedRectangle(cornerRadius: activity ? 15 : (height - 3) / 2, style: .continuous)
             shape.fill(raised(tokens))
                 .overlay(shape.strokeBorder(raisedBorder(tokens), lineWidth: 1))
+        } else if hovering {
+            shape.fill(Color.primary.opacity(0.08))
         }
     }
 
@@ -716,7 +723,7 @@ struct RaptorSidebarMore: View {
             .padding(.trailing, 14)
             .frame(maxWidth: .infinity, minHeight: height - 3, maxHeight: height - 3, alignment: .leading)
             .background {
-                RaptorSidebarRow.pill(selected: selected, height: height, activity: activity, tokens: tokens)
+                RaptorSidebarRow.pill(selected: selected, hovering: false, height: height, activity: activity, tokens: tokens)
             }
             .padding(.horizontal, RaptorSidebar.selectionInset)
             .frame(height: height)

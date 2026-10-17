@@ -117,6 +117,8 @@ struct RaptorTabView: View {
                     .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
                     .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
             }
+        } else if hovering {
+            Capsule().fill(Color.primary.opacity(0.08))
         }
     }
 }
