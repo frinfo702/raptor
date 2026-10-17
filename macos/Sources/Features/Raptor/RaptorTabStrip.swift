@@ -85,7 +85,7 @@ struct RaptorTabView: View {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.raptor)
                 .help("Close Tab")
             }
         }
@@ -104,7 +104,7 @@ struct RaptorTabView: View {
     }
 
     /// The active tab is a raised capsule on the track. Light themes draw it as chrome
-    /// with a border.
+    /// with a border. An inactive tab under the pointer gets a faint plate instead.
     @ViewBuilder private var pill: some View {
         if active {
             if tokens.isLight {
@@ -117,6 +117,8 @@ struct RaptorTabView: View {
                     .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5))
                     .shadow(color: .black.opacity(0.25), radius: 1.5, y: 0.5)
             }
+        } else if hovering {
+            Capsule().fill(Color.primary.opacity(0.08))
         }
     }
 }

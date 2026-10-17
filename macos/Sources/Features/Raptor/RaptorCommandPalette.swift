@@ -284,7 +284,7 @@ struct RaptorSearchField: View {
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.raptor)
                 .help("Clear")
                 .accessibilityLabel("Clear")
             }

@@ -113,7 +113,7 @@ struct RaptorWindowView: View {
                 RaptorSessionItem(label: controller.label, server: controller.client)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.raptor)
             .help("Change Session ⌘K")
             .padding(.trailing, 20)
             RaptorTabStrip(controller: controller, tokens: tokens)
@@ -199,9 +199,52 @@ struct RaptorTitlebarButton: View {
                 .frame(width: 24, height: 24)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.raptor)
         .help(help)
         .accessibilityLabel(help)
+    }
+}
+
+/// Every Raptor button: under the pointer its secondary glyphs brighten to primary and
+/// a soft plate shows behind it, as the host picker's rows do.
+struct RaptorButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .raptorHover()
+            .opacity(configuration.isPressed ? 0.7 : 1)
+    }
+}
+
+extension ButtonStyle where Self == RaptorButtonStyle {
+    static var raptor: RaptorButtonStyle { RaptorButtonStyle() }
+}
+
+extension View {
+    /// The hover feedback of ``RaptorButtonStyle``, for controls that aren't a `Button`.
+    /// `tint: false` keeps only the plate, for system-styled buttons whose bezel the tint would recolor.
+    func raptorHover(tint: Bool = true) -> some View { modifier(RaptorHover(tint: tint)) }
+}
+
+private struct RaptorHover: ViewModifier {
+    let tint: Bool
+    @Environment(\.isEnabled) private var enabled
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        let on = hovering && enabled
+        Group {
+            if tint {
+                // Lifts the label's own `.secondary` styles without touching anything else.
+                content.foregroundStyle(.primary, on ? HierarchicalShapeStyle.primary : .secondary)
+            } else {
+                content
+            }
+        }
+        // The plate reaches past small glyphs without moving them.
+        .background(RoundedRectangle(cornerRadius: 6, style: .continuous)
+            .fill(on ? Color.primary.opacity(0.08) : .clear)
+            .padding(-3))
+        .onHover { hovering = $0 }
     }
 }
 
