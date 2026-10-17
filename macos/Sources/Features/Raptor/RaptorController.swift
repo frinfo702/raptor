@@ -446,8 +446,8 @@ class RaptorController: BaseTerminalController {
 
     /// Show a tab of any session, as a sidebar row does.
     func show(tab id: String, in session: String) {
+        client.send("session.focus", ["session": session, "window": id])
         switchSession(to: session)
-        selectTab(id)
     }
 
     func closeTab(_ id: String) {
@@ -532,6 +532,7 @@ class RaptorController: BaseTerminalController {
             self.session = id
             self.client.switched(self, from: old)
             self.apply(fetched.view, processes: fetched.processes)
+            self.refresh()
         })
     }
 
