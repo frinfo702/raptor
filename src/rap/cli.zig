@@ -193,7 +193,7 @@ fn parseHosts(alloc: Allocator, text: []const u8) ![]const []const u8 {
 /// non-login shell, so put install-rap.sh's ~/.local/bin on PATH.
 fn remoteCommand(alloc: Allocator, argv: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    try out.appendSlice(alloc, "PATH=\"$HOME/.local/bin:$PATH\" rap");
+    try out.appendSlice(alloc, "env PATH=\"$HOME/.local/bin:$PATH\" rap");
     var i: usize = 0;
     var after_dashes = false;
     while (i < argv.len) : (i += 1) {
@@ -1001,7 +1001,7 @@ test "rap cli: remote command drops the server and quotes" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectEqualStrings(
-        "PATH=\"$HOME/.local/bin:$PATH\" rap 'send' '-s' 'a b' 'it'\\''s' '--' '-S' 'x'",
+        "env PATH=\"$HOME/.local/bin:$PATH\" rap 'send' '-s' 'a b' 'it'\\''s' '--' '-S' 'x'",
         try remoteCommand(arena.allocator(), &.{ "-S", "studio", "send", "-s", "a b", "--server", "y", "it's", "--", "-S", "x" }),
     );
 }
