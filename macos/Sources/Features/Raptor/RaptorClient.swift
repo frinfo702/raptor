@@ -28,6 +28,13 @@ final class RaptorClient {
     /// size owner, so each window needs its own. Never freed: surfaces point into them.
     private var streams: [rap_client_t] = []
 
+    /// Requests run here one at a time, in the order they are made, so the main thread
+    /// never waits on the server.
+    private let requests = DispatchQueue(label: "raptor.requests")
+
+    /// Set while `openSessions` waits for the server, so it opens the windows once.
+    private var opening = false
+
     /// Every session's tabs, for the windows' sidebars.
     private(set) lazy var sidebar = RaptorSidebarModel(client: self)
 
@@ -45,7 +52,7 @@ final class RaptorClient {
             let data = Data(bytes: json, count: strlen(json))
             DispatchQueue.main.async { me.handle(data) }
         }, Unmanaged.passRetained(self).toOpaque())
-        call("session.subscribe")
+        send("session.subscribe")
         sidebar.setNeedsReload()
     }
 
@@ -103,7 +110,23 @@ final class RaptorClient {
 
     private struct Ignored: Decodable {}
 
-    /// Make a request and decode its result, nil if it failed.
+    /// Run `work`, which makes requests, off the main thread, then hand its result to
+    /// `done` on the main thread. Work runs, and results arrive, in the order asked.
+    func request<T>(_ work: @escaping (RaptorClient) -> T, done: @escaping (T) -> Void) {
+        requests.async {
+            let result = work(self)
+            DispatchQueue.main.async { done(result) }
+        }
+    }
+
+    /// Make a request off the main thread, then tell `done`, on the main thread, whether
+    /// it worked.
+    func send(_ method: String, _ params: [String: Any] = [:], done: @escaping (Bool) -> Void = { _ in }) {
+        request({ $0.call(method, params) }, done: done)
+    }
+
+    /// Make a request and wait for its result, nil if it failed. Only `request`'s work
+    /// and tests may wait, never the main thread.
     func call<T: Decodable>(_ method: String, _ params: [String: Any] = [:]) -> T? {
         guard let body = try? JSONSerialization.data(withJSONObject: ["method": method, "params": params]),
               let json = String(data: body, encoding: .utf8),
@@ -134,6 +157,17 @@ final class RaptorClient {
     func foregroundName(_ block: String) -> String? {
         let p: BlockProcess? = call("block.method", ["block": block, "method": "process"])
         return RaptorProgram.processName(p?.foreground?.name, argv0: p?.foreground?.argv0)
+    }
+
+    /// The session's view, with the foreground program of each of its blocks that isn't
+    /// in `known`, asked of the server.
+    func view(_ session: String, known: Set<String>) -> (view: RaptorController.SessionView, processes: [String: String])? {
+        guard let view: RaptorController.SessionView = call("session.view", ["session": session]) else { return nil }
+        var processes: [String: String] = [:]
+        for w in view.windows {
+            for b in w.blocks where !known.contains(b.id) { processes[b.id] = foregroundName(b.id) }
+        }
+        return (view, processes)
     }
 
     // MARK: Events
@@ -168,6 +202,9 @@ final class RaptorClient {
             break
         }
         guard let id = event.session else { return }
+        if event.event == "session_destroyed" {
+            for controller in controllers where controller.switching == id { controller.cancelSwitch() }
+        }
         for controller in controllers where controller.session == id {
             switch event.event {
             case "session_destroyed":
@@ -246,23 +283,33 @@ final class RaptorClient {
     }
 
     /// Open a window for each session that had one when the app last quit, else the
-    /// newest session, else a new one. False if there is no server to attach to.
-    static func openSessions(_ ghostty: Ghostty.App) -> Bool {
+    /// newest session, else a new one. `fallback` runs instead if there is no server to
+    /// attach to.
+    static func openSessions(_ ghostty: Ghostty.App, fallback: @escaping () -> Void) {
         // Tests drive the client themselves.
         guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil,
-              let shared else { return false }
+              let shared else { return fallback() }
         if !shared.controllers.isEmpty {
             shared.controllers.forEach { $0.showWindow(nil) }
-            return true
+            return
         }
-        guard let list: SessionList = shared.call("session.list") else { return false }
-        let existing = list.sessions.map(\.id)
-        var ids = attached.filter(existing.contains)
-        if ids.isEmpty, let newest = existing.last { ids = [newest] }
-        if ids.isEmpty, let created = shared.createSession() { ids = [created] }
-        attached = []
-        for id in ids { shared.newWindow(ghostty, session: id) }
-        return !ids.isEmpty
+        guard !shared.opening else { return }
+        shared.opening = true
+        let attached = attached
+        shared.request({ c -> [String]? in
+            guard let list: SessionList = c.call("session.list") else { return nil }
+            let existing = list.sessions.map(\.id)
+            var ids = attached.filter(existing.contains)
+            if ids.isEmpty, let newest = existing.last { ids = [newest] }
+            if ids.isEmpty, let created = c.createSession() { ids = [created] }
+            return ids
+        }, done: { ids in
+            shared.opening = false
+            guard let ids else { return fallback() }
+            Self.attached = []
+            for id in ids { shared.newWindow(ghostty, session: id) }
+            if ids.isEmpty { fallback() }
+        })
     }
 
     /// Show a session in a window, opening one if it has none.

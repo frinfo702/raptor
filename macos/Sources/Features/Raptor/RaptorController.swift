@@ -53,6 +53,10 @@ class RaptorController: BaseTerminalController {
     /// The last view the server sent.
     private var view: SessionView?
 
+    /// The session a pending `switchSession` is headed to, so an earlier switch's view
+    /// that arrives late, or a second one for the same session, is dropped.
+    private(set) var switching: String?
+
     /// Blocks by id, from the view and the server's events.
     @Published private(set) var blocks: [String: Block] = [:]
 
@@ -195,9 +199,20 @@ class RaptorController: BaseTerminalController {
         }
     }
 
-    /// Fetch the session's view and bring the tabs and splits in line with it.
+    /// Fetch the session's view off the main thread, then bring the tabs and splits in
+    /// line with it.
     func refresh() {
-        guard let view: SessionView = client.call("session.view", ["session": session]) else { return }
+        let session = session
+        let known = Set(blocks.filter { $0.value.process != nil }.keys)
+        client.request({ $0.view(session, known: known) }, done: { [weak self] fetched in
+            // A closed window, or one that has moved to another session, has no use for it.
+            guard let self, let fetched, self.session == session,
+                  self.client.controllers.contains(where: { $0 === self }) else { return }
+            self.apply(fetched.view, processes: fetched.processes)
+        })
+    }
+
+    private func apply(_ view: SessionView, processes: [String: String]) {
         let focusedBefore = self.view?.windows.first { $0.id == view.active_window }?.focused_block
         self.view = view
         label = view.label
@@ -210,7 +225,7 @@ class RaptorController: BaseTerminalController {
                 var block = blocks[b.id] ?? Block()
                 block.title = b.title
                 block.pwd = Self.path(b.pwd ?? "")
-                if block.process == nil { block.process = client.foregroundName(b.id) }
+                if block.process == nil { block.process = processes[b.id] }
                 if blocks[b.id] != block { blocks[b.id] = block }
             }
             let root = node(w.layout, seen: &seen)
@@ -334,7 +349,7 @@ class RaptorController: BaseTerminalController {
         if o.ratio != n.ratio,
            let a = block(of: n.left.leftmostLeaf()),
            let b = block(of: n.right.leftmostLeaf()) {
-            client.call("session.resize_split", ["session": session, "block": a, "target": b, "ratio": n.ratio])
+            client.send("session.resize_split", ["session": session, "block": a, "target": b, "ratio": n.ratio])
         }
         sendRatios(o.left, n.left)
         sendRatios(o.right, n.right)
@@ -386,7 +401,7 @@ class RaptorController: BaseTerminalController {
         if let to, let block = block(of: to),
            let w = view?.windows.first(where: { $0.id == view?.active_window }),
            w.focused_block != block {
-            client.call("session.focus", ["session": session, "block": block])
+            client.send("session.focus", ["session": session, "block": block])
         }
     }
 
@@ -408,7 +423,7 @@ class RaptorController: BaseTerminalController {
     // MARK: Actions
 
     func newTab() {
-        client.call("session.new_window", ["session": session])
+        client.send("session.new_window", ["session": session])
     }
 
     func split(_ surface: Ghostty.SurfaceView, _ direction: SplitTree<Ghostty.SurfaceView>.NewDirection) {
@@ -417,7 +432,7 @@ class RaptorController: BaseTerminalController {
 
     func zoom(_ surface: Ghostty.SurfaceView) {
         guard let block = block(of: surface) else { return }
-        client.call("session.zoom_block", ["session": session, "block": block])
+        client.send("session.zoom_block", ["session": session, "block": block])
     }
 
     func close(_ surface: Ghostty.SurfaceView) {
@@ -426,20 +441,20 @@ class RaptorController: BaseTerminalController {
     }
 
     func selectTab(_ id: String) {
-        client.call("session.focus", ["session": session, "window": id])
+        client.send("session.focus", ["session": session, "window": id])
     }
 
     /// Show a tab of any session, as a sidebar row does.
     func show(tab id: String, in session: String) {
+        client.send("session.focus", ["session": session, "window": id])
         switchSession(to: session)
-        selectTab(id)
     }
 
     func closeTab(_ id: String) {
         guard let w = view?.windows.first(where: { $0.id == id }) else { return }
         confirmKill(w.blocks.map(\.id), messageText: "Close Tab?") { [weak self] in
             guard let self else { return }
-            self.client.call("session.close_window", ["session": self.session, "window": id])
+            self.client.send("session.close_window", ["session": self.session, "window": id])
         }
     }
 
@@ -450,7 +465,7 @@ class RaptorController: BaseTerminalController {
     ) {
         let blocks = node.leaves().compactMap { leaf in surfaces.first { $0.value === leaf }?.key }
         confirmKill(blocks, messageText: "Close Pane?") { [weak self] in
-            blocks.forEach { self?.client.call("block.close", ["block": $0]) }
+            blocks.forEach { self?.client.send("block.close", ["block": $0]) }
         }
     }
 
@@ -463,7 +478,7 @@ class RaptorController: BaseTerminalController {
         guard let block = surfaces.first(where: { $0.value === oldView })?.key else { return nil }
         // ponytail: the server splits only right and down; left and up map onto them.
         let dir = direction == .right || direction == .left ? "right" : "down"
-        client.call("session.new_split", ["session": session, "block": block, "direction": dir])
+        client.send("session.new_split", ["session": session, "block": block, "direction": dir])
         return nil
     }
 
@@ -479,12 +494,12 @@ class RaptorController: BaseTerminalController {
         case .left: "left"
         case .right: "right"
         }
-        client.call("session.move_block", ["session": session, "block": moved, "target": target, "direction": direction])
+        client.send("session.move_block", ["session": session, "block": moved, "target": target, "direction": direction])
     }
 
     // ponytail: reads the process name locally, which holds while the server is on this Mac.
     /// True if the block's foreground program is something other than a shell.
-    private func isBusy(_ block: String) -> Bool {
+    private static func isBusy(_ block: String, _ client: RaptorClient) -> Bool {
         guard let p: RaptorClient.BlockProcess = client.call("block.method", ["block": block, "method": "process"]) else { return false }
         var name = [CChar](repeating: 0, count: 256)
         // proc_name fails (EPERM) for setuid programs such as top or sudo; shells are never setuid.
@@ -494,70 +509,89 @@ class RaptorController: BaseTerminalController {
 
     /// Run `kill`, after asking first if any of the blocks runs something besides a shell.
     private func confirmKill(_ blocks: [String], messageText: String, kill: @escaping () -> Void) {
-        let busy = blocks.contains(where: isBusy)
-        guard busy else { return kill() }
-        confirmClose(
-            messageText: messageText,
-            informativeText: "A process is still running. Closing will kill it.",
-            completion: kill)
+        client.request({ c in blocks.contains { Self.isBusy($0, c) } }, done: { [weak self] busy in
+            guard busy else { return kill() }
+            self?.confirmClose(
+                messageText: messageText,
+                informativeText: "A process is still running. Closing will kill it.",
+                completion: kill)
+        })
     }
 
     // MARK: Sessions and windows
 
     /// Show another session in this window.
     func switchSession(to id: String) {
+        switching = id
         guard id != session else { return }
-        let old = session
-        unbindAll()
-        session = id
-        client.switched(self, from: old)
-        refresh()
+        client.request({ $0.view(id, known: []) }, done: { [weak self] fetched in
+            guard let self, self.switching == id else { return }
+            self.switching = nil
+            guard let fetched, self.client.controllers.contains(where: { $0 === self }) else { return }
+            self.unbindAll()
+            let old = self.session
+            self.session = id
+            self.client.switched(self, from: old)
+            self.apply(fetched.view, processes: fetched.processes)
+            self.refresh()
+        })
+    }
+
+    /// The session a switch is headed to was destroyed, so the switch won't happen.
+    func cancelSwitch() {
+        switching = nil
     }
 
     /// Make a session and show it here.
     func newSession(label: String? = nil) {
-        guard let id = client.createSession(label: label) else {
-            return alert("Couldn't create the session", label.map { "A session named “\($0)” may already exist." })
-        }
-        switchSession(to: id)
+        client.request({ $0.createSession(label: label) }, done: { [weak self] id in
+            guard let self else { return }
+            guard let id else {
+                return self.alert("Couldn't create the session", label.map { "A session named “\($0)” may already exist." })
+            }
+            self.switchSession(to: id)
+        })
     }
 
     /// The session before or after this one in the server's list, wrapping around.
     func cycleSession(by offset: Int) {
-        let ids = client.sessions().map(\.id)
-        guard let i = ids.firstIndex(of: session), ids.count > 1 else { return }
-        switchSession(to: ids[(i + offset + ids.count) % ids.count])
+        client.request({ $0.sessions().map(\.id) }, done: { [weak self] ids in
+            guard let self, let i = ids.firstIndex(of: self.switching ?? self.session), ids.count > 1 else { return }
+            self.switchSession(to: ids[(i + offset + ids.count) % ids.count])
+        })
     }
 
     func renameSession(id: String? = nil) {
         let id = id ?? session
-        let current = client.sessions().first { $0.id == id }?.label ?? label
-        prompt("Rename Session", current) { [weak self] name in
+        client.request({ $0.sessions().first { $0.id == id }?.label }, done: { [weak self] found in
             guard let self else { return }
-            if !self.client.call("session.set_label", ["session": id, "label": name]) {
-                self.alert("Couldn't rename the session", "A session named “\(name)” may already exist.")
+            self.prompt("Rename Session", found ?? self.label) { name in
+                self.client.send("session.set_label", ["session": id, "label": name]) { ok in
+                    if !ok { self.alert("Couldn't rename the session", "A session named “\(name)” may already exist.") }
+                }
             }
-        }
+        })
     }
 
     func renameTab() {
         guard let id = activeTab, let current = tabs.first(where: { $0.id == id })?.title else { return }
         prompt("Rename Tab", current) { [weak self] name in
             guard let self else { return }
-            self.client.call("session.set_window_label", ["session": self.session, "window": id, "label": name])
+            self.client.send("session.set_window_label", ["session": self.session, "window": id, "label": name])
         }
     }
 
     /// Kill a session and everything running in it, after asking.
     func closeSession(id: String? = nil) {
         let id = id ?? session
-        let name = client.sessions().first { $0.id == id }?.label ?? id
-        confirmClose(
-            messageText: "Close Session “\(name)”?",
-            informativeText: "Every tab in the session and the programs running in them will be closed."
-        ) { [weak self] in
-            self?.client.call("session.kill", ["session": id])
-        }
+        client.request({ $0.sessions().first { $0.id == id }?.label }, done: { [weak self] found in
+            self?.confirmClose(
+                messageText: "Close Session “\(found ?? id)”?",
+                informativeText: "Every tab in the session and the programs running in them will be closed."
+            ) { [weak self] in
+                self?.client.send("session.kill", ["session": id])
+            }
+        })
     }
 
     /// Fetch every window's session again.
@@ -670,7 +704,9 @@ class RaptorController: BaseTerminalController {
             }
         }
         let appearance = RaptorAppearance.shared
-        let current = client.sessions()
+        // The sidebar's sessions, kept current from the server's events: the palette is
+        // built now, so it can't wait for the server.
+        let current = client.sidebar.sessions
         let styles = RaptorAppearance.Style.allCases.filter { $0 != .glass || RaptorAppearance.glassAvailable }
 
         return [

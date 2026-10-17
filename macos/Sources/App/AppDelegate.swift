@@ -376,11 +376,11 @@ class AppDelegate: NSObject,
             //   - if we're opening a URL since `application(_:openFile:)` is called before this.
             //   - if we're restoring from persisted state
             if TerminalController.all.isEmpty && derivedConfig.initialWindow {
-                undoManager.disableUndoRegistration()
-                if !RaptorClient.openSessions(ghostty) {
+                RaptorClient.openSessions(ghostty) { [ghostty, undoManager] in
+                    undoManager.disableUndoRegistration()
                     _ = TerminalController.newWindow(ghostty)
+                    undoManager.enableUndoRegistration()
                 }
-                undoManager.enableUndoRegistration()
             }
         }
     }
@@ -472,9 +472,7 @@ class AppDelegate: NSObject,
         }
 
         // No visible windows, open a new one.
-        if !RaptorClient.openSessions(ghostty) {
-            _ = TerminalController.newWindow(ghostty)
-        }
+        RaptorClient.openSessions(ghostty) { [ghostty] in _ = TerminalController.newWindow(ghostty) }
         return false
     }
 
@@ -1009,8 +1007,7 @@ class AppDelegate: NSObject,
             raptor.newWindow()
             return
         }
-        if RaptorClient.openSessions(ghostty) { return }
-        _ = TerminalController.newWindow(ghostty)
+        RaptorClient.openSessions(ghostty) { [ghostty] in _ = TerminalController.newWindow(ghostty) }
     }
 
     @IBAction func newTab(_ sender: Any?) {
