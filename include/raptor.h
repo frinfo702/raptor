@@ -34,7 +34,8 @@ typedef struct rap_mirror_s* rap_mirror_t;
 // rap_client_request, bind or unbind.
 typedef void (*rap_event_cb)(void* userdata, const char* json);
 
-// Connect to the server listening on socket_path. If socket_path is NULL,
+// Connect to the server listening on socket_path, or on a tailnet node
+// given as host[:port] (rap -S takes the same). If socket_path is NULL,
 // use $RAP_SERVER or the per-user default socket. Never starts a server.
 // Returns NULL if there is no server.
 GHOSTTY_API rap_client_t rap_client_connect(const char* socket_path);

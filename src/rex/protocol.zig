@@ -26,6 +26,8 @@ const builtin = @import("builtin");
 const posix = std.posix;
 const c = std.c;
 const Allocator = std.mem.Allocator;
+const Ip4Address = std.Io.net.Ip4Address;
+const tailscale = @import("tailscale.zig");
 
 pub const version = 1;
 
@@ -259,6 +261,54 @@ pub fn resolveSocketPath(
     return alloc.dupeSentinel(u8, abs, 0);
 }
 
+/// The server a client talks to: `resolveSocketPath`, unless `-S` or
+/// `RAP_SERVER` is `host[:port]` for a node on the tailnet and no file
+/// here; then `tailnetTarget`. Allocates more than the result; use
+/// an arena.
+pub fn resolveServer(
+    alloc: Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    flag: ?[]const u8,
+) ![:0]u8 {
+    const s = flag orelse env.get("RAP_SERVER") orelse "";
+    tailnet: {
+        if (s.len == 0 or std.mem.indexOfScalar(u8, s, '/') != null) break :tailnet;
+        if (std.Io.Dir.cwd().access(io, s, .{})) |_| break :tailnet else |_| {}
+        const colon = std.mem.lastIndexOfScalar(u8, s, ':');
+        const port = if (colon) |i| std.fmt.parseInt(u16, s[i + 1 ..], 10) catch break :tailnet else tailscale.default_port;
+        const host = s[0 .. colon orelse s.len];
+        const st = tailscale.status(alloc, io) catch break :tailnet;
+        return try tailnetTarget(alloc, env, st, host, port) orelse break :tailnet;
+    }
+    return resolveSocketPath(alloc, io, env, flag);
+}
+
+/// The server `host:port` names on the tailnet `st`: a peer's `ip:port`,
+/// or for this node, the default socket, since local clients use it.
+fn tailnetTarget(
+    alloc: Allocator,
+    env: *const std.process.Environ.Map,
+    st: tailscale.Status,
+    host: []const u8,
+    port: u16,
+) !?[:0]u8 {
+    for (st.peers) |p| if (p.named(host))
+        return try std.fmt.allocPrintSentinel(alloc, "{f}", .{Ip4Address{ .bytes = p.ip, .port = port }}, 0);
+    if (st.self.named(host)) return try defaultSocketPath(alloc, env);
+    return null;
+}
+
+/// The address of a tailnet server as `resolveServer` gives it: `ip:port`
+/// in Tailscale's 100.64.0.0/10.
+pub fn tailnetAddress(server: []const u8) ?Ip4Address {
+    const colon = std.mem.lastIndexOfScalar(u8, server, ':') orelse return null;
+    const port = std.fmt.parseInt(u16, server[colon + 1 ..], 10) catch return null;
+    const addr = Ip4Address.parse(server[0..colon], port) catch return null;
+    if (addr.bytes[0] != 100 or addr.bytes[1] & 0xc0 != 64) return null;
+    return addr;
+}
+
 extern "c" fn confstr(name: c_int, buf: ?[*]u8, len: usize) usize;
 const _CS_DARWIN_USER_TEMP_DIR = 65537;
 
@@ -307,18 +357,88 @@ pub fn unixSocket() error{SocketFailed}!posix.fd_t {
 
 pub const ConnectError = error{ Unreachable, NameTooLong, SocketFailed, ForeignServer };
 
-/// Connect to the server. `Unreachable` means no server is listening, and
+/// Connect to the server: a socket path, or a tailnet server's address
+/// from `resolveServer`. `Unreachable` means no server is listening, and
 /// `ForeignServer` that another user's process is.
-pub fn connect(path: []const u8) ConnectError!posix.fd_t {
+pub fn connect(server: []const u8) ConnectError!posix.fd_t {
+    // WireGuard has authenticated the node, and its server checks us.
+    if (tailnetAddress(server)) |addr| return dialTcp(addr, 5000);
+    const fd = try dialUnix(server);
+    errdefer _ = c.close(fd);
+    const p = peer(fd) catch return error.ForeignServer;
+    if (p.uid != c.getuid()) return error.ForeignServer;
+    return fd;
+}
+
+/// Connect to the Unix socket at `path`, whoever listens there.
+pub fn dialUnix(path: []const u8) ConnectError!posix.fd_t {
     const addr = try sockaddr(path);
     const fd = try unixSocket();
     errdefer _ = c.close(fd);
     while (c.connect(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) != 0) {
         if (posix.errno(-1) != .INTR) return error.Unreachable;
     }
-    const p = peer(fd) catch return error.ForeignServer;
-    if (p.uid != c.getuid()) return error.ForeignServer;
     return fd;
+}
+
+fn sockaddrIn(addr: Ip4Address) c.sockaddr.in {
+    return .{ .port = std.mem.nativeToBig(u16, addr.port), .addr = @bitCast(addr.bytes) };
+}
+
+fn tcpSocket() error{SocketFailed}!posix.fd_t {
+    const fd = c.socket(c.AF.INET, c.SOCK.STREAM, 0);
+    if (fd < 0) return error.SocketFailed;
+    setCloexec(fd);
+    return fd;
+}
+
+/// Send keystrokes as they come rather than batched.
+pub fn setNodelay(fd: posix.fd_t) void {
+    const on: c_int = 1;
+    _ = c.setsockopt(fd, c.IPPROTO.TCP, c.TCP.NODELAY, std.mem.asBytes(&on), @sizeOf(c_int));
+}
+
+/// Connect to `addr` over TCP within `timeout_ms`, since a node that is
+/// offline never answers.
+pub fn dialTcp(addr: Ip4Address, timeout_ms: c_int) ConnectError!posix.fd_t {
+    const fd = try tcpSocket();
+    errdefer _ = c.close(fd);
+    const sa = sockaddrIn(addr);
+    setNonblocking(fd, true);
+    if (c.connect(fd, @ptrCast(&sa), @sizeOf(c.sockaddr.in)) != 0) {
+        if (posix.errno(-1) != .INPROGRESS) return error.Unreachable;
+        var pfd = [_]c.pollfd{.{ .fd = fd, .events = c.POLL.OUT, .revents = 0 }};
+        if (c.poll(&pfd, 1, timeout_ms) != 1) return error.Unreachable;
+        var err: c_int = 0;
+        var len: c.socklen_t = @sizeOf(c_int);
+        if (c.getsockopt(fd, c.SOL.SOCKET, c.SO.ERROR, &err, &len) != 0 or err != 0) return error.Unreachable;
+    }
+    setNonblocking(fd, false);
+    setNodelay(fd);
+    return fd;
+}
+
+/// Listen on `addr` over TCP, nonblocking.
+pub fn listenTcp(addr: Ip4Address) error{ SocketFailed, AddressInUse, BindFailed, ListenFailed }!posix.fd_t {
+    const fd = try tcpSocket();
+    errdefer _ = c.close(fd);
+    // A restarted server may listen while its old connections linger.
+    const on: c_int = 1;
+    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.REUSEADDR, std.mem.asBytes(&on), @sizeOf(c_int));
+    const sa = sockaddrIn(addr);
+    if (c.bind(fd, @ptrCast(&sa), @sizeOf(c.sockaddr.in)) != 0)
+        return if (posix.errno(-1) == .ADDRINUSE) error.AddressInUse else error.BindFailed;
+    if (c.listen(fd, 64) != 0) return error.ListenFailed;
+    setNonblocking(fd, true);
+    return fd;
+}
+
+/// The address of the other end of a TCP connection.
+pub fn peerAddress(fd: posix.fd_t) ?Ip4Address {
+    var sa: c.sockaddr.in = undefined;
+    var len: c.socklen_t = @sizeOf(c.sockaddr.in);
+    if (c.getpeername(fd, @ptrCast(&sa), &len) != 0 or sa.family != c.AF.INET) return null;
+    return .{ .bytes = @bitCast(sa.addr), .port = std.mem.bigToNative(u16, sa.port) };
 }
 
 pub const Peer = struct {
@@ -419,4 +539,39 @@ test "rex protocol: socket path precedence" {
     defer alloc.free(default);
     try std.testing.expect(std.mem.endsWith(u8, default, "/default.sock"));
     try std.testing.expect(default.len < (c.sockaddr.un{ .path = undefined }).path.len);
+}
+
+test "rex protocol: tailnet addresses" {
+    const addr = tailnetAddress("100.96.1.3:7277").?;
+    try std.testing.expectEqualSlices(u8, &.{ 100, 96, 1, 3 }, &addr.bytes);
+    try std.testing.expectEqual(7277, addr.port);
+    try std.testing.expect(tailnetAddress("100.127.255.1:1") != null);
+    // Off the tailnet, or no address at all.
+    for ([_][]const u8{ "100.128.0.1:7277", "10.0.0.1:7277", "100.96.1.3", "/tmp/100.96.1.3:7277", "box:7277" }) |s|
+        try std.testing.expect(tailnetAddress(s) == null);
+}
+
+test "rex protocol: a tailnet name is a peer's address or this node's socket" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env: std.process.Environ.Map = .init(alloc);
+    const st: tailscale.Status = .{
+        .self = .{ .name = "mac.tail1.ts.net", .ip = .{ 100, 96, 1, 2 }, .user = 1 },
+        .peers = &.{.{ .name = "box.tail1.ts.net", .ip = .{ 100, 96, 1, 3 }, .user = 1 }},
+    };
+    try std.testing.expectEqualStrings("100.96.1.3:7277", (try tailnetTarget(alloc, &env, st, "box", 7277)).?);
+    const default = try defaultSocketPath(alloc, &env);
+    for ([_][]const u8{ "mac", "mac.tail1.ts.net", "100.96.1.2" }) |host|
+        try std.testing.expectEqualStrings(default, (try tailnetTarget(alloc, &env, st, host, 9000)).?);
+    try std.testing.expect(try tailnetTarget(alloc, &env, st, "elsewhere", 7277) == null);
+}
+
+test "rex protocol: a socket path is no tailnet server" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var env: std.process.Environ.Map = .init(arena.allocator());
+    try std.testing.expectEqualStrings("/tmp/s.sock", try resolveServer(arena.allocator(), std.testing.io, &env, "/tmp/s.sock"));
+    const rel = try resolveServer(arena.allocator(), std.testing.io, &env, "raptor-no-such-node.sock");
+    try std.testing.expect(std.fs.path.isAbsolute(rel) and tailnetAddress(rel) == null);
 }

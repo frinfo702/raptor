@@ -7,6 +7,7 @@ const EnvMap = std.process.Environ.Map;
 const Writer = std.Io.Writer;
 const protocol = @import("../rex/protocol.zig");
 const Client = @import("../rex/Client.zig");
+const tailscale = @import("../rex/tailscale.zig");
 const ExitCode = @import("exit.zig").Code;
 const os_path = @import("../os/path.zig");
 
@@ -36,8 +37,9 @@ pub const usage =
     \\                         values that parse as JSON are sent as JSON
     \\
     \\Server:
-    \\  server run [--idle-timeout secs]    Run the server in the foreground
-    \\  server start [--idle-timeout secs]  Start the server in the background
+    \\  server run [--idle-timeout secs] [--tailnet [--port n] [--allow logins]]
+    \\                         Run the server in the foreground
+    \\  server start [same flags]           Start the server in the background
     \\  server stop | server status
     \\  server stats [--json]               Print memory use per block
     \\
@@ -50,16 +52,27 @@ pub const usage =
     \\  -s <session>  -w <window>  -b <block>   Targets: id, label, position, or id suffix
     \\  -S, --server <host|address>
     \\                Server: a host from rap hosts, ssh://[user@]host[:port],
-    \\                or a socket path (default: $RAP_SERVER, else per user)
+    \\                a tailnet node as name[:port], or a socket path
+    \\                (default: $RAP_SERVER, else per user)
     \\  --json        Print results as JSON
     \\
     \\Inside a rap block, RAP_SESSION and RAP_BLOCK are the default targets,
     \\and windows and sessions made with run and new belong under that block.
     \\Set RAP_AUTOSTART=0 to never start a server on demand.
     \\
-    \\The hosts are the Host aliases in ~/.ssh/config. On a host, the command
-    \\runs as `ssh <host> rap ...`, so rap must be in ~/.local/bin or on that
-    \\host's PATH.
+    \\The hosts are the Host aliases in ~/.ssh/config, then the tailnet nodes
+    \\whose rap server answers. On an SSH host, the command runs as
+    \\`ssh <host> rap ...`, so rap must be in ~/.local/bin or on that host's
+    \\PATH. A tailnet node is reached on port 7277 unless name:port says
+    \\otherwise.
+    \\
+    \\A server run with --tailnet also listens on this node's tailnet address,
+    \\on port 7277 or --port, and stays up when idle. It lets in the nodes of
+    \\this node's Tailscale user, and of the users --allow names as login
+    \\names (me@github,pal@github). They get your shell. It trusts every
+    \\process of those users on every one of their nodes, so do not use it
+    \\on a machine shared with other users. Clients on this machine use the
+    \\Unix socket; the tailnet listener refuses them.
     \\
 ;
 
@@ -73,27 +86,33 @@ pub const Args = struct {
     wait: bool = false,
     all: bool = false,
     down: bool = false,
+    tailnet: bool = false,
     idle_timeout: ?[]const u8 = null,
+    port: ?[]const u8 = null,
+    allow: ?[]const u8 = null,
     /// The command name and its operands.
     words: []const []const u8 = &.{},
     /// Everything after `--`.
     command: ?[]const []const u8 = null,
 };
 
-const value_flags = std.StaticStringMap(enum { session, window, block, server, idle_timeout }).initComptime(.{
+const value_flags = std.StaticStringMap(enum { session, window, block, server, idle_timeout, port, allow }).initComptime(.{
     .{ "-s", .session },
     .{ "-w", .window },
     .{ "-b", .block },
     .{ "-S", .server },
     .{ "--server", .server },
     .{ "--idle-timeout", .idle_timeout },
+    .{ "--port", .port },
+    .{ "--allow", .allow },
 });
 
-const bool_flags = std.StaticStringMap(enum { json, wait, all, down }).initComptime(.{
+const bool_flags = std.StaticStringMap(enum { json, wait, all, down, tailnet }).initComptime(.{
     .{ "--json", .json },
     .{ "--wait", .wait },
     .{ "--all", .all },
     .{ "--down", .down },
+    .{ "--tailnet", .tailnet },
 });
 
 pub const ParseError = error{ MissingValue, UnknownFlag } || Allocator.Error;
@@ -166,6 +185,37 @@ pub fn sshDestination(alloc: Allocator, io: std.Io, env: *const EnvMap, flag: ?[
     return null;
 }
 
+/// The short names of the online tailnet peers whose rap server answers on
+/// the default port.
+// ponytail: a thread per online peer, fine for a personal tailnet; poll
+// nonblocking sockets instead if tailnets get large.
+fn tailnetHosts(alloc: Allocator, io: std.Io) anyerror![]const []const u8 {
+    const st = tailscale.status(alloc, io) catch return &.{};
+    const found = try alloc.alloc(bool, st.peers.len);
+    @memset(found, false);
+    const threads = try alloc.alloc(?std.Thread, st.peers.len);
+    for (st.peers, threads, found) |p, *t, *f|
+        t.* = if (p.online) std.Thread.spawn(.{}, probe, .{ p.ip, f }) catch null else null;
+    for (threads) |t| if (t) |th| th.join();
+    var list: std.ArrayList([]const u8) = .empty;
+    for (st.peers, found) |p, f| if (f)
+        try list.append(alloc, p.name[0 .. std.mem.indexOfScalar(u8, p.name, '.') orelse p.name.len]);
+    return list.items;
+}
+
+/// Whether a rap server at `ip` answers within a second and lets us in.
+fn probe(ip: [4]u8, found: *bool) void {
+    const fd = protocol.dialTcp(.{ .bytes = ip, .port = tailscale.default_port }, 1000) catch return;
+    defer _ = c.close(fd);
+    const timeout: c.timeval = .{ .sec = 1, .usec = 0 };
+    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.RCVTIMEO, std.mem.asBytes(&timeout), @sizeOf(c.timeval));
+    protocol.writeFrame(fd, .json, "{\"id\":1,\"method\":\"server.version\",\"params\":{}}") catch return;
+    var buf: [4096]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&buf);
+    const frame = protocol.readFrame(fba.allocator(), fd) catch return;
+    found.* = frame.type == .json and std.mem.indexOf(u8, frame.payload, "\"result\"") != null;
+}
+
 /// The Host aliases in `~/.ssh/config`.
 fn hosts(alloc: Allocator, io: std.Io, env: *const EnvMap) ![]const []const u8 {
     const home = env.get("HOME") orelse return &.{};
@@ -228,6 +278,12 @@ const Ctx = struct {
     err: *Writer,
     fd: posix.fd_t = -1,
     next_id: i64 = 1,
+    /// The server, once resolved.
+    resolved: ?[:0]u8 = null,
+    /// The server is a tailnet node, where this machine's paths, variables
+    /// and blocks mean nothing.
+    remote: bool = false,
+    tailnet_hosts: *const fn (Allocator, std.Io) anyerror![]const []const u8 = &tailnetHosts,
 
     const Error = anyerror;
 
@@ -242,9 +298,10 @@ const Ctx = struct {
             try self.err.writeAll(usage);
             return .usage;
         }
+        if (!local) self.remote = protocol.tailnetAddress(try self.socketPath()) != null;
         // The server execs the command, and a pane whose program can't start closes
         // at once. Look it up here, on the caller's PATH, so a typo is an error.
-        if (self.args.command) |command| if (command.len > 0) {
+        if (self.args.command) |command| if (command.len > 0 and !self.remote) {
             const exe = try os_path.expand(self.io, self.alloc, self.env, command[0]) orelse {
                 try self.err.print("rap: {s}: command not found\n", .{command[0]});
                 return exitStatus(127);
@@ -306,7 +363,8 @@ const Ctx = struct {
     // Connection
 
     fn socketPath(self: *Ctx) Error![:0]u8 {
-        return protocol.resolveSocketPath(self.alloc, self.io, self.env, self.args.server);
+        if (self.resolved == null) self.resolved = try protocol.resolveServer(self.alloc, self.io, self.env, self.args.server);
+        return self.resolved.?;
     }
 
     /// Connect, starting a server first if `autostart` and none is running.
@@ -322,10 +380,15 @@ const Ctx = struct {
 
     /// How to start a server: this executable's `server run`.
     fn launch(self: *Ctx) Error!Client.Launch {
+        var args: std.ArrayList([]const u8) = .empty;
+        if (self.args.tailnet) try args.append(self.alloc, "--tailnet");
+        if (self.args.port) |p| try args.appendSlice(self.alloc, &.{ "--port", p });
+        if (self.args.allow) |a| try args.appendSlice(self.alloc, &.{ "--allow", a });
         return .{
             .exe = try std.process.executablePathAlloc(self.io, self.alloc),
             .env = self.env,
             .idle_timeout = self.args.idle_timeout,
+            .args = args.items,
         };
     }
 
@@ -350,6 +413,11 @@ const Ctx = struct {
             const frame = try protocol.readFrame(self.alloc, self.fd);
             const msg = try std.json.parseFromSliceLeaky(std.json.Value, self.alloc, frame.payload, .{});
             if (msg != .object) return error.BadResponse;
+            // A tailnet server that won't let us in says why, then hangs up.
+            if (std.mem.eql(u8, str(msg, "event"), "refused")) {
+                try self.err.print("rap: {s}\n", .{str(msg, "message")});
+                return .{ .failed = .fail };
+            }
             const got = msg.object.get("id") orelse continue;
             if (got != .integer or got.integer != id) continue;
             if (msg.object.get("error")) |e| {
@@ -383,10 +451,15 @@ const Ctx = struct {
         const none = a.session == null and a.window == null and a.block == null;
         const by_name = a.window == null and (if (a.block) |b| std.meta.isError(std.fmt.parseInt(usize, b, 10)) else false);
         return .{
-            .session = a.session orelse if (by_name) null else self.env.get("RAP_SESSION"),
+            .session = a.session orelse if (by_name) null else self.localEnv("RAP_SESSION"),
             .window = a.window,
-            .block = if (none) self.env.get("RAP_BLOCK") else a.block,
+            .block = if (none) self.localEnv("RAP_BLOCK") else a.block,
         };
+    }
+
+    /// A variable that only this machine's server understands.
+    fn localEnv(self: *Ctx, key: []const u8) ?[]const u8 {
+        return if (self.remote) null else self.env.get(key);
     }
 
     fn str(v: std.json.Value, key: []const u8) []const u8 {
@@ -402,11 +475,12 @@ const Ctx = struct {
     /// The variables the client hands to new sessions.
     fn sessionEnv(self: *Ctx) Error!std.json.Value {
         var obj = try std.json.ObjectMap.init(self.alloc, &.{}, &.{});
-        for (protocol.session_env) |k| if (self.env.get(k)) |v| try obj.put(self.alloc, k, .{ .string = v });
+        for (protocol.session_env) |k| if (self.localEnv(k)) |v| try obj.put(self.alloc, k, .{ .string = v });
         return .{ .object = obj };
     }
 
     fn cwd(self: *Ctx) ?[]const u8 {
+        if (self.remote) return null;
         return std.process.currentPathAlloc(self.io, self.alloc) catch null;
     }
 
@@ -446,7 +520,7 @@ const Ctx = struct {
             .command = self.args.command,
             .cwd = self.cwd(),
             .env = try self.sessionEnv(),
-            .parent = self.env.get("RAP_BLOCK"),
+            .parent = self.localEnv("RAP_BLOCK"),
         })) {
             .result => |v| v,
             .failed => |code| return code,
@@ -465,7 +539,7 @@ const Ctx = struct {
             .command = command,
             .cwd = self.cwd(),
             .wait = self.args.wait,
-            .parent = self.env.get("RAP_BLOCK"),
+            .parent = self.localEnv("RAP_BLOCK"),
         };
         var resp = try self.call("session.list", .{});
         const none = resp == .result and resp.result.object.get("sessions").?.array.items.len == 0;
@@ -692,7 +766,10 @@ const Ctx = struct {
         try o.print("clients: {d}\n", .{clients.len});
         for (clients) |cl| {
             const p = cl.object.get("principal").?;
-            try o.print("  {s} uid {d} pid {d} over unix\n", .{ str(cl, "id"), int(p, "uid"), int(p, "pid") });
+            if (std.mem.eql(u8, str(p, "transport"), "tailscale"))
+                try o.print("  {s} {s} on {s} over tailscale\n", .{ str(cl, "id"), str(p, "login"), str(p, "node") })
+            else
+                try o.print("  {s} uid {d} pid {d} over unix\n", .{ str(cl, "id"), int(p, "uid"), int(p, "pid") });
         }
     }
 
@@ -726,10 +803,11 @@ const Ctx = struct {
 
     fn listHosts(self: *Ctx) Error!ExitCode {
         const list = try hosts(self.alloc, self.io, self.env);
+        const tailnet = try self.tailnet_hosts(self.alloc, self.io);
         if (self.args.json) {
-            try std.json.Stringify.value(.{ .hosts = list }, .{}, self.out);
+            try std.json.Stringify.value(.{ .hosts = list, .tailnet = tailnet }, .{}, self.out);
             try self.out.writeByte('\n');
-        } else for (list) |h| try self.out.print("{s}\n", .{h});
+        } else for ([_][]const []const u8{ list, tailnet }) |l| for (l) |h| try self.out.print("{s}\n", .{h});
         return .ok;
     }
 
@@ -737,9 +815,27 @@ const Ctx = struct {
         const words = self.args.words;
         const sub = if (words.len == 2) words[1] else "";
         if (std.mem.eql(u8, sub, "start")) {
+            if (self.remote) return self.usageError("a tailnet node starts its own server: rap server start --tailnet", .{});
             const path = try self.socketPath();
             if (protocol.connect(path)) |fd| {
-                _ = c.close(fd);
+                self.fd = fd;
+                defer _ = c.close(fd);
+                if (self.args.tailnet) {
+                    const r = switch (try self.call("server.status", .{})) {
+                        .result => |v| v,
+                        .failed => |code| return code,
+                    };
+                    const at = str(r, "tailnet");
+                    var want: u16 = tailscale.default_port;
+                    if (self.args.port) |p| want = std.fmt.parseInt(u16, p, 10) catch
+                        return self.usageError("invalid --port '{s}'", .{p});
+                    const colon = std.mem.lastIndexOfScalar(u8, at, ':') orelse at.len;
+                    const port = std.fmt.parseInt(u16, at[@min(colon + 1, at.len)..], 10) catch 0;
+                    if (port != want) {
+                        try self.err.print("rap: the server running on {s} is not on the tailnet at port {d}; stop it and start it again with --tailnet\n", .{ path, want });
+                        return .fail;
+                    }
+                }
                 try self.out.print("server already running on {s}\n", .{path});
                 return .ok;
             } else |_| {}
@@ -763,8 +859,10 @@ const Ctx = struct {
                 try self.printJson(r);
                 return .ok;
             }
-            try self.out.print("running pid {d} on {s}\nversion: {s}\nsessions: {d}\nclients: {d}\n", .{
-                int(r, "pid"), str(r, "socket"), str(r, "version"), int(r, "sessions"), int(r, "clients"),
+            try self.out.print("running pid {d} on {s}\n", .{ int(r, "pid"), str(r, "socket") });
+            if (str(r, "tailnet").len > 0) try self.out.print("tailnet: {s}\n", .{str(r, "tailnet")});
+            try self.out.print("version: {s}\nsessions: {d}\nclients: {d}\n", .{
+                str(r, "version"), int(r, "sessions"), int(r, "clients"),
             });
             return .ok;
         }
@@ -979,8 +1077,24 @@ test "rap cli: hosts runs locally under RAP_SERVER" {
     try env.put("RAP_SERVER", "studio");
     var out: Writer.Allocating = .init(alloc);
     var err: Writer.Allocating = .init(alloc);
-    try std.testing.expectEqual(.ok, try run(alloc, std.testing.io, &env, &.{"hosts"}, &out.writer, &err.writer));
-    try std.testing.expectEqualStrings("studio\n", out.written());
+    var bad: []const u8 = "";
+    const argv: []const []const u8 = &.{"hosts"};
+    var ctx: Ctx = .{
+        .alloc = alloc,
+        .io = std.testing.io,
+        .env = &env,
+        .args = try parse(alloc, argv, &bad),
+        .argv = argv,
+        .out = &out.writer,
+        .err = &err.writer,
+        .tailnet_hosts = &struct {
+            fn f(_: Allocator, _: std.Io) anyerror![]const []const u8 {
+                return &.{"pi"};
+            }
+        }.f,
+    };
+    try std.testing.expectEqual(.ok, try ctx.dispatch());
+    try std.testing.expectEqualStrings("studio\npi\n", out.written());
 }
 
 test "rap cli: unreadable ssh config has no hosts" {
@@ -995,6 +1109,25 @@ test "rap cli: unreadable ssh config has no hosts" {
     var env: EnvMap = .init(alloc);
     try env.put("HOME", home);
     try std.testing.expectEqual(null, try sshDestination(alloc, std.testing.io, &env, "s.sock"));
+}
+
+test "rap cli: a refused connection prints why" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var fds: [2]c.fd_t = undefined;
+    try std.testing.expectEqual(0, c.socketpair(c.AF.UNIX, c.SOCK.STREAM, 0, &fds));
+    defer for (fds) |fd| {
+        _ = c.close(fd);
+    };
+    try protocol.writeFrame(fds[1], .json, "{\"event\":\"refused\",\"message\":\"pal@github on pal may not use this server\"}");
+    var env: EnvMap = .init(alloc);
+    var out: Writer.Allocating = .init(alloc);
+    var err: Writer.Allocating = .init(alloc);
+    var ctx: Ctx = .{ .alloc = alloc, .io = std.testing.io, .env = &env, .args = .{}, .argv = &.{}, .out = &out.writer, .err = &err.writer, .fd = fds[0] };
+    const r = try ctx.call("session.list", .{});
+    try std.testing.expectEqual(ExitCode.fail, r.failed);
+    try std.testing.expectEqualStrings("rap: pal@github on pal may not use this server\n", err.written());
 }
 
 test "rap cli: remote command drops the server and quotes" {
