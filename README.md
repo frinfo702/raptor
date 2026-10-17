@@ -42,6 +42,17 @@ For more details, see [About Ghostty](https://ghostty.org/docs/about).
 
 See the [download page](https://ghostty.org/download) on the Ghostty website.
 
+### Raptor's `rap` on a remote machine
+
+Install `rap` on a macOS or Linux machine (x86_64 or arm64) without sudo:
+
+```sh
+curl -fsSL https://github.com/frinfo702/raptor/releases/latest/download/install-rap.sh | sh
+```
+
+It verifies the download's checksum and installs `rap` into
+`~/.local/bin`.
+
 ## Documentation
 
 See the [documentation](https://ghostty.org/docs) on the Ghostty website.

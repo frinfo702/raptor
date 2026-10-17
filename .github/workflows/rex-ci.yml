@@ -42,8 +42,9 @@ jobs:
       - name: Test rap
         run: zig build test -Dapp-runtime=none -Dfont-backend=freetype -Dtest-filter=rap
 
+      # Static musl, like the released Linux rap, so e2e checks what ships.
       - name: Build rap
-        run: zig build rap -Dapp-runtime=none -Dfont-backend=freetype
+        run: zig build rap -Dapp-runtime=none -Dfont-backend=freetype -Dtarget=x86_64-linux-musl
 
       # The e2e checks the shell integration of these shells and bash.
       - name: Install shells

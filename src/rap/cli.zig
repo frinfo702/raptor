@@ -58,7 +58,8 @@ pub const usage =
     \\Set RAP_AUTOSTART=0 to never start a server on demand.
     \\
     \\The hosts are the Host aliases in ~/.ssh/config. On a host, the command
-    \\runs as `ssh <host> rap ...`, so rap must be on that host's PATH.
+    \\runs as `ssh <host> rap ...`, so rap must be in ~/.local/bin or on that
+    \\host's PATH.
     \\
 ;
 
@@ -188,10 +189,11 @@ fn parseHosts(alloc: Allocator, text: []const u8) ![]const []const u8 {
 }
 
 /// `argv` as a command for the remote shell: `rap` and the arguments, quoted,
-/// less the server, since the remote rap uses its own.
+/// less the server, since the remote rap uses its own. ssh runs it in a
+/// non-login shell, so put install-rap.sh's ~/.local/bin on PATH.
 fn remoteCommand(alloc: Allocator, argv: []const []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
-    try out.appendSlice(alloc, "rap");
+    try out.appendSlice(alloc, "env PATH=\"$HOME/.local/bin:$PATH\" rap");
     var i: usize = 0;
     var after_dashes = false;
     while (i < argv.len) : (i += 1) {
@@ -999,7 +1001,7 @@ test "rap cli: remote command drops the server and quotes" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectEqualStrings(
-        "rap 'send' '-s' 'a b' 'it'\\''s' '--' '-S' 'x'",
+        "env PATH=\"$HOME/.local/bin:$PATH\" rap 'send' '-s' 'a b' 'it'\\''s' '--' '-S' 'x'",
         try remoteCommand(arena.allocator(), &.{ "-S", "studio", "send", "-s", "a b", "--server", "y", "it's", "--", "-S", "x" }),
     );
 }
