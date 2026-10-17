@@ -104,7 +104,7 @@ struct RaptorTabView: View {
     }
 
     /// The active tab is a raised capsule on the track. Light themes draw it as chrome
-    /// with a border.
+    /// with a border. An inactive tab under the pointer gets a faint plate instead.
     @ViewBuilder private var pill: some View {
         if active {
             if tokens.isLight {
