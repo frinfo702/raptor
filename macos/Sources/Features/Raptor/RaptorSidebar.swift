@@ -138,7 +138,8 @@ final class RaptorSidebarModel: ObservableObject {
     }
 
     private func checkout(_ dir: String) -> RaptorGitCheckout? {
-        guard !dir.isEmpty else { return nil }
+        // A tailnet machine's directories aren't on this Mac.
+        guard !dir.isEmpty, client?.host == nil else { return nil }
         if let known = checkouts[dir] { return known }
         let found = RaptorGitCheckout.resolve(dir)
         checkouts[dir] = found
@@ -280,10 +281,10 @@ final class RaptorSidebarModel: ObservableObject {
 }
 
 /// The vertical sidebar: a header with the traffic lights, the sidebar toggle and the
-/// Activity Mode eye; the host, each session and its tabs; and a footer of actions.
+/// Activity Mode eye; each host, its sessions and their tabs; and a footer of actions.
 /// Sizes are Rex's, from the captain's reference frames at 2x.
 struct RaptorSidebar: View {
-    @ObservedObject var model: RaptorSidebarModel
+    @ObservedObject var servers: RaptorClient.Servers
     @ObservedObject var controller: RaptorController
     @ObservedObject var appearance: RaptorAppearance
     let tokens: ThemeTokens
@@ -299,7 +300,6 @@ struct RaptorSidebar: View {
     static let spring = Animation.spring(response: 0.3, dampingFraction: 0.9)
 
     var body: some View {
-        let rows = RaptorSidebarModel.rows(model.sessions, activity: appearance.activity)
         VStack(spacing: 0) {
             // SwiftUI stretches the scroll view up into the title bar's safe area, so
             // the header stays in front of it to keep its buttons' clicks.
@@ -307,34 +307,13 @@ struct RaptorSidebar: View {
                 .zIndex(1)
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 0) {
-                    RaptorSidebarHost(name: "This Mac", symbol: "laptopcomputer")
-                    ForEach(rows) { row in
-                        switch row {
-                        case .session(_, let label, let first):
-                            RaptorSidebarSessionHeader(label: label, first: first)
-                                .transition(.opacity)
-                        case .tab(let tab, let branch):
-                            RaptorSidebarRow(
-                                tab: tab,
-                                branch: branch,
-                                selected: tab.session == controller.session && tab.id == controller.activeTab,
-                                activity: appearance.activity,
-                                tokens: tokens
-                            ) {
-                                controller.show(tab: tab.id, in: tab.session)
-                            }
-                            .transition(.opacity)
-                        case .more(_, let hidden, let branch):
-                            RaptorSidebarMore(
-                                branch: branch,
-                                selected: hidden.contains {
-                                    $0.session == controller.session && $0.id == controller.activeTab
-                                },
-                                activity: appearance.activity,
-                                tokens: tokens
-                            )
-                            .transition(.opacity)
-                        }
+                    ForEach(servers.clients) { server in
+                        RaptorSidebarServer(
+                            model: server.sidebar,
+                            server: server,
+                            controller: controller,
+                            activity: appearance.activity,
+                            tokens: tokens)
                     }
                 }
                 .padding(.bottom, 24)
@@ -393,14 +372,174 @@ struct RaptorSidebar: View {
             RaptorTitlebarButton(symbol: "rectangle.stack.badge.plus", help: "New Session ⇧⌘N") {
                 controller.newSession()
             }
-            // ponytail: one host until rap reaches remote machines; the button holds its place.
-            RaptorTitlebarButton(symbol: "network", help: "Add Host (remote hosts aren't supported yet)") {}
-                .disabled(true)
+            RaptorTitlebarButton(symbol: "network", help: "Machines on Your Tailnet") {
+                controller.hostPickerIsShowing.toggle()
+            }
+            .popover(isPresented: $controller.hostPickerIsShowing, arrowEdge: .top) {
+                RaptorHostPicker(controller: controller) { controller.hostPickerIsShowing = false }
+            }
         }
         .padding(.leading, 12)
         .padding(.trailing, 13)
         .frame(height: 40)
         .padding(.bottom, 4)
+    }
+}
+
+/// A server's part of the sidebar: its machine, then each session and its tabs.
+struct RaptorSidebarServer: View {
+    @ObservedObject var model: RaptorSidebarModel
+    let server: RaptorClient
+    @ObservedObject var controller: RaptorController
+    let activity: Bool
+    let tokens: ThemeTokens
+
+    var body: some View {
+        let rows = RaptorSidebarModel.rows(model.sessions, activity: activity)
+        let shown = server === controller.client
+        VStack(spacing: 0) {
+            RaptorSidebarHost(name: server.name, symbol: server.host == nil ? "laptopcomputer" : "server.rack")
+            ForEach(rows) { row in
+                switch row {
+                case .session(_, let label, let first):
+                    RaptorSidebarSessionHeader(label: label, first: first)
+                        .transition(.opacity)
+                case .tab(let tab, let branch):
+                    RaptorSidebarRow(
+                        tab: tab,
+                        branch: branch,
+                        selected: shown && tab.session == controller.session && tab.id == controller.activeTab,
+                        activity: activity,
+                        tokens: tokens
+                    ) {
+                        controller.show(tab: tab.id, in: tab.session, on: server)
+                    }
+                    .transition(.opacity)
+                case .more(_, let hidden, let branch):
+                    RaptorSidebarMore(
+                        branch: branch,
+                        selected: shown && hidden.contains {
+                            $0.session == controller.session && $0.id == controller.activeTab
+                        },
+                        activity: activity,
+                        tokens: tokens
+                    )
+                    .transition(.opacity)
+                }
+            }
+        }
+    }
+}
+
+/// The machines a window can show the sessions of: this Mac, then the macOS and Linux
+/// machines on the tailnet, looked for as it opens. Picking one without a rap server
+/// running says how to start one there.
+struct RaptorHostPicker: View {
+    @ObservedObject var controller: RaptorController
+    let dismiss: () -> Void
+
+    /// Nil while looking, and stays nil without Tailscale.
+    @State private var peers: [RaptorClient.Peer]?
+    @State private var looking = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            row("This Mac", symbol: "laptopcomputer", detail: nil, current: controller.client.host == nil) {
+                if let local = RaptorClient.shared { controller.showNewest(on: local) }
+            }
+            Divider().padding(.vertical, 4)
+            if let peers, !peers.isEmpty {
+                ForEach(peers) { peer in
+                    row(peer.name, symbol: "server.rack", detail: Self.detail(peer), current: controller.client.host == peer.dns) {
+                        controller.open(peer)
+                    }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    if looking { ProgressView().controlSize(.small) }
+                    Text(looking ? "Looking on your tailnet…"
+                        : peers == nil ? "Tailscale isn't running on this Mac."
+                        : "No other Mac or Linux machine on your tailnet is online.")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.system(size: 12))
+                .padding(.horizontal, 8)
+                .frame(minHeight: 28)
+            }
+        }
+        .padding(6)
+        .frame(width: 300)
+        .onAppear {
+            DispatchQueue.global().async {
+                let found = RaptorClient.tailnetPeers()
+                DispatchQueue.main.async {
+                    peers = found
+                    looking = false
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Machines")
+    }
+
+    /// What a machine's row says about its rap server.
+    static func detail(_ peer: RaptorClient.Peer) -> String? {
+        switch peer.rap {
+        case .running: nil
+        case .refused: "Not allowed"
+        case .none: "rap not running"
+        }
+    }
+
+    private func row(_ name: String, symbol: String, detail: String?, current: Bool, pick: @escaping () -> Void) -> some View {
+        RaptorHostPickerRow(name: name, symbol: symbol, detail: detail, current: current) {
+            dismiss()
+            if !current { pick() }
+        }
+    }
+}
+
+struct RaptorHostPickerRow: View {
+    let name: String
+    let symbol: String
+    let detail: String?
+    let current: Bool
+    let pick: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            Text(name)
+                .lineLimit(1)
+                .layoutPriority(1)
+            Spacer(minLength: 12)
+            if let detail {
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Image(systemName: "checkmark")
+                .font(.system(size: 11, weight: .semibold))
+                .opacity(current ? 1 : 0)
+        }
+        .font(.system(size: 13))
+        .padding(.horizontal, 8)
+        .frame(height: 28)
+        .background(RoundedRectangle(cornerRadius: 6).fill(hovering ? Color.primary.opacity(0.08) : .clear))
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: pick)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(detail.map { "\(name), \($0)" } ?? name)
+        .accessibilityAddTraits(current ? [.isButton, .isSelected] : .isButton)
+        .accessibilityAction(.default, pick)
     }
 }
 

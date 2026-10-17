@@ -40,6 +40,15 @@ typedef void (*rap_event_cb)(void* userdata, const char* json);
 // Returns NULL if there is no server.
 GHOSTTY_API rap_client_t rap_client_connect(const char* socket_path);
 
+// The online macOS and Linux machines on this machine's tailnet, other
+// than this one, as JSON:
+// {"peers":[{"name":"box","dns":"box.tail1.ts.net","rap":"running"}]}.
+// "rap" is "running" if a rap server answers on the machine's default
+// port, "refused" if one answers but won't let this machine in, and
+// "none" otherwise. Asks every machine at once and takes up to a couple
+// of seconds. Returns NULL if Tailscale isn't running here.
+GHOSTTY_API char* rap_tailnet_peers(void);
+
 // Disconnect. Free surfaces bound to the client first.
 GHOSTTY_API void rap_client_free(rap_client_t);
 

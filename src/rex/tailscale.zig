@@ -31,16 +31,56 @@ pub const Node = struct {
     /// The owning user's login name, such as "me@github".
     login: []const u8 = "",
     online: bool = true,
+    /// The node's OS as Tailscale names it: "linux", "macOS", "iOS", ...
+    os: []const u8 = "",
+
+    /// The MagicDNS name's first label.
+    pub fn short(n: Node) []const u8 {
+        return n.name[0 .. std.mem.indexOfScalar(u8, n.name, '.') orelse n.name.len];
+    }
 
     /// Whether `host` names this node: its MagicDNS name, the name's first
     /// label, or its address.
     pub fn named(n: Node, host: []const u8) bool {
-        const short = n.name[0 .. std.mem.indexOfScalar(u8, n.name, '.') orelse n.name.len];
-        if (std.ascii.eqlIgnoreCase(host, n.name) or std.ascii.eqlIgnoreCase(host, short)) return true;
+        if (std.ascii.eqlIgnoreCase(host, n.name) or std.ascii.eqlIgnoreCase(host, n.short())) return true;
         const ip = Ip4Address.parse(host, 0) catch return false;
         return std.mem.eql(u8, &ip.bytes, &n.ip);
     }
 };
+
+/// How the rap server on a node's default port answers a client.
+pub const Answer = enum { none, running, refused };
+
+/// How the rap server on each of `nodes` answers, asked of all at once.
+/// Offline nodes are not asked.
+// ponytail: a thread per online peer, fine for a personal tailnet; poll
+// nonblocking sockets instead if tailnets get large.
+pub fn probe(alloc: Allocator, nodes: []const Node) Allocator.Error![]Answer {
+    const answers = try alloc.alloc(Answer, nodes.len);
+    @memset(answers, .none);
+    const threads = try alloc.alloc(?std.Thread, nodes.len);
+    defer alloc.free(threads);
+    for (nodes, threads, answers) |n, *t, *a|
+        t.* = if (n.online) std.Thread.spawn(.{}, probeOne, .{ n.ip, a }) catch null else null;
+    for (threads) |t| if (t) |th| th.join();
+    return answers;
+}
+
+/// Whether a rap server at `ip` answers within a second, and lets us in.
+fn probeOne(ip: [4]u8, answer: *Answer) void {
+    const fd = protocol.dialTcp(.{ .bytes = ip, .port = default_port }, 1000) catch return;
+    defer _ = c.close(fd);
+    const timeout: c.timeval = .{ .sec = 1, .usec = 0 };
+    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.RCVTIMEO, std.mem.asBytes(&timeout), @sizeOf(c.timeval));
+    // A server that refuses us says so as we connect, so read even if this fails.
+    protocol.writeFrame(fd, .json, "{\"id\":1,\"method\":\"server.version\",\"params\":{}}") catch {};
+    var buf: [4096]u8 = undefined;
+    var fba: std.heap.FixedBufferAllocator = .init(&buf);
+    const frame = protocol.readFrame(fba.allocator(), fd) catch return;
+    if (frame.type != .json) return;
+    if (std.mem.indexOf(u8, frame.payload, "\"result\"") != null) answer.* = .running;
+    if (std.mem.indexOf(u8, frame.payload, "\"event\":\"refused\"") != null) answer.* = .refused;
+}
 
 pub const Status = struct {
     self: Node,
@@ -156,6 +196,7 @@ fn peerStatus(v: std.json.Value, users: std.json.Value) ?Node {
         .user = user,
         .login = login,
         .online = if (v.object.get("Online")) |o| o == .bool and o.bool else false,
+        .os = str(v, "OS"),
     };
 }
 
@@ -209,7 +250,7 @@ test "tailscale: status" {
         \\{"BackendState":"Running",
         \\ "Self":{"DNSName":"mac.tail1.ts.net.","UserID":7,"TailscaleIPs":["100.67.1.2","fd7a:115c:a1e0::1"],"Online":true},
         \\ "Peer":{
-        \\  "nodekey:a":{"DNSName":"box.tail1.ts.net.","UserID":7,"TailscaleIPs":["fd7a:115c:a1e0::2","100.96.1.3"],"Online":true},
+        \\  "nodekey:a":{"DNSName":"box.tail1.ts.net.","UserID":7,"TailscaleIPs":["fd7a:115c:a1e0::2","100.96.1.3"],"Online":true,"OS":"linux"},
         \\  "nodekey:b":{"DNSName":"ci.tail1.ts.net.","UserID":9,"Tags":["tag:ci"],"TailscaleIPs":["100.96.1.4"],"Online":false},
         \\  "nodekey:c":{"DNSName":"v6only.tail1.ts.net.","UserID":7,"TailscaleIPs":["fd7a:115c:a1e0::5"]}},
         \\ "User":{"7":{"ID":7,"LoginName":"me@github"}}}
@@ -221,6 +262,8 @@ test "tailscale: status" {
     const box = s.peers[0];
     try std.testing.expectEqualSlices(u8, &.{ 100, 96, 1, 3 }, &box.ip);
     try std.testing.expect(box.online);
+    try std.testing.expectEqualStrings("linux", box.os);
+    try std.testing.expectEqualStrings("box", box.short());
     try std.testing.expect(box.named("box") and box.named("BOX.tail1.ts.net") and box.named("100.96.1.3"));
     try std.testing.expect(!box.named("bo") and !box.named("100.96.1.4") and !box.named("tail1"));
     // A tagged node has no user, whatever UserID says.

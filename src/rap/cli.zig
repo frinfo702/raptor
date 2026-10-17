@@ -186,34 +186,13 @@ pub fn sshDestination(alloc: Allocator, io: std.Io, env: *const EnvMap, flag: ?[
 }
 
 /// The short names of the online tailnet peers whose rap server answers on
-/// the default port.
-// ponytail: a thread per online peer, fine for a personal tailnet; poll
-// nonblocking sockets instead if tailnets get large.
+/// the default port and lets us in.
 fn tailnetHosts(alloc: Allocator, io: std.Io) anyerror![]const []const u8 {
     const st = tailscale.status(alloc, io) catch return &.{};
-    const found = try alloc.alloc(bool, st.peers.len);
-    @memset(found, false);
-    const threads = try alloc.alloc(?std.Thread, st.peers.len);
-    for (st.peers, threads, found) |p, *t, *f|
-        t.* = if (p.online) std.Thread.spawn(.{}, probe, .{ p.ip, f }) catch null else null;
-    for (threads) |t| if (t) |th| th.join();
     var list: std.ArrayList([]const u8) = .empty;
-    for (st.peers, found) |p, f| if (f)
-        try list.append(alloc, p.name[0 .. std.mem.indexOfScalar(u8, p.name, '.') orelse p.name.len]);
+    for (st.peers, try tailscale.probe(alloc, st.peers)) |p, a| if (a == .running)
+        try list.append(alloc, p.short());
     return list.items;
-}
-
-/// Whether a rap server at `ip` answers within a second and lets us in.
-fn probe(ip: [4]u8, found: *bool) void {
-    const fd = protocol.dialTcp(.{ .bytes = ip, .port = tailscale.default_port }, 1000) catch return;
-    defer _ = c.close(fd);
-    const timeout: c.timeval = .{ .sec = 1, .usec = 0 };
-    _ = c.setsockopt(fd, c.SOL.SOCKET, c.SO.RCVTIMEO, std.mem.asBytes(&timeout), @sizeOf(c.timeval));
-    protocol.writeFrame(fd, .json, "{\"id\":1,\"method\":\"server.version\",\"params\":{}}") catch return;
-    var buf: [4096]u8 = undefined;
-    var fba: std.heap.FixedBufferAllocator = .init(&buf);
-    const frame = protocol.readFrame(fba.allocator(), fd) catch return;
-    found.* = frame.type == .json and std.mem.indexOf(u8, frame.payload, "\"result\"") != null;
 }
 
 /// The Host aliases in `~/.ssh/config`.

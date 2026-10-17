@@ -3,15 +3,16 @@ import CryptoKit
 import GhosttyKit
 import os
 
-/// The app's one connection to the rap server. It lives as long as the app: surfaces
-/// configured by a client point into it, so it is never freed.
-final class RaptorClient {
+/// The app's connection to a rap server: this Mac's, or one on a tailnet machine. It
+/// lives as long as the app: surfaces configured by a client point into it, so it is
+/// never freed.
+final class RaptorClient: Identifiable {
     static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier!,
         category: "raptor"
     )
 
-    /// Nil if no server could be reached or started.
+    /// This Mac's server. Nil if no server could be reached or started.
     static let shared: RaptorClient? = RaptorClient()
 
     /// Requests and events.
@@ -19,6 +20,12 @@ final class RaptorClient {
 
     /// The server's socket, nil for the default one.
     let socket: String?
+
+    /// The tailnet machine the server runs on, by MagicDNS name; nil for this Mac.
+    let host: String?
+
+    /// The machine, as the sidebar names it.
+    let name: String
 
     /// The open session windows. Several may show one session.
     private(set) var controllers: [RaptorController] = []
@@ -39,13 +46,24 @@ final class RaptorClient {
     private(set) lazy var sidebar = RaptorSidebarModel(client: self)
 
     /// Connect to the server on `socket`, else on the default socket, starting it if needed.
-    init?(socket: String? = nil) {
+    convenience init?(socket: String? = nil) {
         guard Self.startServer(socket: socket), let client = rap_client_connect(socket) else {
             Self.logger.warning("no rap server")
             return nil
         }
+        self.init(client, socket: socket, host: nil, name: "This Mac")
+    }
+
+    /// The server on a tailnet machine, `host` its MagicDNS name and `name` the short one.
+    convenience init(_ client: rap_client_t, host: String, name: String) {
+        self.init(client, socket: nil, host: host, name: name)
+    }
+
+    private init(_ client: rap_client_t, socket: String?, host: String?, name: String) {
         self.client = client
         self.socket = socket
+        self.host = host
+        self.name = name
         rap_client_set_event_callback(client, { userdata, json in
             guard let userdata, let json else { return }
             let me = Unmanaged<RaptorClient>.fromOpaque(userdata).takeUnretainedValue()
@@ -54,6 +72,8 @@ final class RaptorClient {
         }, Unmanaged.passRetained(self).toOpaque())
         send("session.subscribe")
         sidebar.setNeedsReload()
+        // Clients are made on the main thread, which the sidebar reads this on.
+        Servers.shared.clients.append(self)
     }
 
     // MARK: Server
@@ -101,6 +121,73 @@ final class RaptorClient {
         }
         return rap
     }
+
+    // MARK: Tailnet
+
+    /// Every server the app has connected to, in the order it did: this Mac's, then
+    /// tailnet machines'. The sidebar lists their sessions in that order.
+    final class Servers: ObservableObject {
+        static let shared = Servers()
+        @Published fileprivate(set) var clients: [RaptorClient] = []
+
+        func client(host: String) -> RaptorClient? { clients.first { $0.host == host } }
+
+        /// The client for `host` made from `connection`, or the one made already, in which
+        /// case `connection` is closed.
+        func add(_ connection: rap_client_t, host: String, name: String) -> RaptorClient {
+            if let known = client(host: host) {
+                DispatchQueue.global().async { rap_client_free(connection) }
+                return known
+            }
+            return RaptorClient(connection, host: host, name: name)
+        }
+    }
+
+    /// A macOS or Linux machine on the tailnet, as `rap_tailnet_peers` reports it.
+    struct Peer: Decodable, Identifiable, Equatable {
+        enum Rap: String, Decodable { case running, refused, none }
+        /// The MagicDNS name's first label.
+        let name: String
+        /// The MagicDNS name.
+        let dns: String
+        /// How a rap server there answers.
+        let rap: Rap
+
+        var id: String { dns }
+    }
+
+    private struct Peers: Decodable {
+        let peers: [Peer]
+    }
+
+    /// The online macOS and Linux machines on the tailnet, those running rap first; nil
+    /// if Tailscale isn't running. Asks every machine, so never on the main thread.
+    static func tailnetPeers() -> [Peer]? {
+        guard let json = rap_tailnet_peers() else { return nil }
+        defer { free(json) }
+        let peers = (try? JSONDecoder().decode(Peers.self, from: Data(bytes: json, count: strlen(json))))?.peers ?? []
+        return peers.sorted { ($0.rap == .running ? 0 : 1, $0.name) < ($1.rap == .running ? 0 : 1, $1.name) }
+    }
+
+    /// A connection to the rap server on the tailnet machine `host` that lets us in, nil
+    /// if none answers there. Waits on the network, so never on the main thread.
+    static func dial(host: String) -> rap_client_t? {
+        guard let c = rap_client_connect(host) else { return nil }
+        // A server that won't let us in hangs up on every request.
+        if let resp = rap_client_request(c, #"{"method":"session.list","params":{}}"#) {
+            defer { free(resp) }
+            if strstr(resp, #""result""#) != nil { return c }
+        }
+        rap_client_free(c)
+        return nil
+    }
+
+    /// What to run on a machine to install rap and start its server on the tailnet, as
+    /// the README gives it.
+    static let installCommands = """
+        curl -fsSL https://github.com/frinfo702/raptor/releases/latest/download/install-rap.sh | sh
+        ~/.local/bin/rap server start --tailnet
+        """
 
     // MARK: Requests
 
@@ -268,7 +355,9 @@ final class RaptorClient {
 
     /// Make a session, named `label` or by the server, in the home directory.
     func createSession(label: String? = nil) -> String? {
-        var params: [String: Any] = ["cwd": NSHomeDirectory()]
+        var params: [String: Any] = [:]
+        // A tailnet machine's server starts in its own home.
+        if host == nil { params["cwd"] = NSHomeDirectory() }
         if let label { params["label"] = label }
         let created: Created? = call("session.create", params)
         return created?.session
@@ -334,11 +423,35 @@ final class RaptorClient {
 
     /// A connection no open window uses.
     private func stream() -> rap_client_t {
-        let used = controllers.map(\.stream)
-        if let free = streams.first(where: { s in !used.contains(where: { $0 == s }) }) { return free }
+        if let free = freeStream { return free }
         // ponytail: falls back to sharing the control connection, and so its size ownership.
-        guard let s = rap_client_connect(socket) else { return client }
+        // A tailnet machine's connections are made by `prepareStream`, off the main thread.
+        guard host == nil, let s = rap_client_connect(socket) else { return client }
         streams.append(s)
+        return s
+    }
+
+    private var freeStream: rap_client_t? {
+        let used = controllers.map(\.stream)
+        return streams.first { s in !used.contains { $0 == s } }
+    }
+
+    /// Have a connection no open window uses ready, making one off the main thread if
+    /// there is none, then call `done`.
+    func prepareStream(_ done: @escaping () -> Void) {
+        guard freeStream == nil else { return done() }
+        request({ c in rap_client_connect(c.host ?? c.socket) }, done: { [self] s in
+            if let s { streams.append(s) }
+            done()
+        })
+    }
+
+    /// A window moved here from a session of `old`'s: its panes take one of this
+    /// server's connections, which this returns.
+    func adopt(_ controller: RaptorController, from old: RaptorClient) -> rap_client_t {
+        old.controllers.removeAll { $0 === controller }
+        let s = stream()
+        controllers.append(controller)
         return s
     }
 
