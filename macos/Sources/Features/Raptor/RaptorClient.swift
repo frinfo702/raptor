@@ -202,6 +202,9 @@ final class RaptorClient {
             break
         }
         guard let id = event.session else { return }
+        if event.event == "session_destroyed" {
+            for controller in controllers where controller.switching == id { controller.cancelSwitch() }
+        }
         for controller in controllers where controller.session == id {
             switch event.event {
             case "session_destroyed":

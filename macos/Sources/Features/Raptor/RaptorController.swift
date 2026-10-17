@@ -53,9 +53,9 @@ class RaptorController: BaseTerminalController {
     /// The last view the server sent.
     private var view: SessionView?
 
-    /// The session last asked for by `switchSession`, so an earlier switch's view that
-    /// arrives late is dropped.
-    private var switching: String?
+    /// The session a pending `switchSession` is headed to, so an earlier switch's view
+    /// that arrives late, or a second one for the same session, is dropped.
+    private(set) var switching: String?
 
     /// Blocks by id, from the view and the server's events.
     @Published private(set) var blocks: [String: Block] = [:]
@@ -525,8 +525,9 @@ class RaptorController: BaseTerminalController {
         switching = id
         guard id != session else { return }
         client.request({ $0.view(id, known: []) }, done: { [weak self] fetched in
-            guard let self, let fetched, self.switching == id,
-                  self.client.controllers.contains(where: { $0 === self }) else { return }
+            guard let self, self.switching == id else { return }
+            self.switching = nil
+            guard let fetched, self.client.controllers.contains(where: { $0 === self }) else { return }
             self.unbindAll()
             let old = self.session
             self.session = id
@@ -534,6 +535,11 @@ class RaptorController: BaseTerminalController {
             self.apply(fetched.view, processes: fetched.processes)
             self.refresh()
         })
+    }
+
+    /// The session a switch is headed to was destroyed, so the switch won't happen.
+    func cancelSwitch() {
+        switching = nil
     }
 
     /// Make a session and show it here.
@@ -550,7 +556,7 @@ class RaptorController: BaseTerminalController {
     /// The session before or after this one in the server's list, wrapping around.
     func cycleSession(by offset: Int) {
         client.request({ $0.sessions().map(\.id) }, done: { [weak self] ids in
-            guard let self, let i = ids.firstIndex(of: self.session), ids.count > 1 else { return }
+            guard let self, let i = ids.firstIndex(of: self.switching ?? self.session), ids.count > 1 else { return }
             self.switchSession(to: ids[(i + offset + ids.count) % ids.count])
         })
     }
