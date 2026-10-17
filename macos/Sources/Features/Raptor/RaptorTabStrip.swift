@@ -85,7 +85,7 @@ struct RaptorTabView: View {
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.raptor)
                 .help("Close Tab")
             }
         }

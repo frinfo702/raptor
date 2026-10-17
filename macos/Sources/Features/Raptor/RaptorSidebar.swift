@@ -366,6 +366,7 @@ struct RaptorSidebar: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .frame(width: 24, height: 24)
+            .raptorHover()
             .help("Filter")
             .accessibilityLabel("Filter")
             Spacer(minLength: 0)
@@ -558,7 +559,7 @@ struct RaptorActivityButton: View {
                 .background(Circle().fill(on ? RaptorSidebarRow.raised(tokens) : .clear))
                 .contentShape(Circle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.raptor)
         .help(on ? "Hide Activity ⇧⌘A" : "Show Activity ⇧⌘A")
         .accessibilityLabel("Show Activity")
         .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
