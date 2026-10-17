@@ -263,7 +263,7 @@ pub fn resolveSocketPath(
 
 /// The server a client talks to: `resolveSocketPath`, unless `-S` or
 /// `RAP_SERVER` is `host[:port]` for a node on the tailnet and no file
-/// here; then that node's `ip:port`. Allocates more than the result; use
+/// here; then `tailnetTarget`. Allocates more than the result; use
 /// an arena.
 pub fn resolveServer(
     alloc: Allocator,
@@ -279,12 +279,24 @@ pub fn resolveServer(
         const port = if (colon) |i| std.fmt.parseInt(u16, s[i + 1 ..], 10) catch break :tailnet else tailscale.default_port;
         const host = s[0 .. colon orelse s.len];
         const st = tailscale.status(alloc, io) catch break :tailnet;
-        const node = for (st.peers) |p| {
-            if (p.named(host)) break p;
-        } else if (st.self.named(host)) st.self else break :tailnet;
-        return std.fmt.allocPrintSentinel(alloc, "{f}", .{Ip4Address{ .bytes = node.ip, .port = port }}, 0);
+        return try tailnetTarget(alloc, env, st, host, port) orelse break :tailnet;
     }
     return resolveSocketPath(alloc, io, env, flag);
+}
+
+/// The server `host:port` names on the tailnet `st`: a peer's `ip:port`,
+/// or for this node, the default socket, since local clients use it.
+fn tailnetTarget(
+    alloc: Allocator,
+    env: *const std.process.Environ.Map,
+    st: tailscale.Status,
+    host: []const u8,
+    port: u16,
+) !?[:0]u8 {
+    for (st.peers) |p| if (p.named(host))
+        return try std.fmt.allocPrintSentinel(alloc, "{f}", .{Ip4Address{ .bytes = p.ip, .port = port }}, 0);
+    if (st.self.named(host)) return try defaultSocketPath(alloc, env);
+    return null;
 }
 
 /// The address of a tailnet server as `resolveServer` gives it: `ip:port`
@@ -537,6 +549,22 @@ test "rex protocol: tailnet addresses" {
     // Off the tailnet, or no address at all.
     for ([_][]const u8{ "100.128.0.1:7277", "10.0.0.1:7277", "100.96.1.3", "/tmp/100.96.1.3:7277", "box:7277" }) |s|
         try std.testing.expect(tailnetAddress(s) == null);
+}
+
+test "rex protocol: a tailnet name is a peer's address or this node's socket" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var env: std.process.Environ.Map = .init(alloc);
+    const st: tailscale.Status = .{
+        .self = .{ .name = "mac.tail1.ts.net", .ip = .{ 100, 96, 1, 2 }, .user = 1 },
+        .peers = &.{.{ .name = "box.tail1.ts.net", .ip = .{ 100, 96, 1, 3 }, .user = 1 }},
+    };
+    try std.testing.expectEqualStrings("100.96.1.3:7277", (try tailnetTarget(alloc, &env, st, "box", 7277)).?);
+    const default = try defaultSocketPath(alloc, &env);
+    for ([_][]const u8{ "mac", "mac.tail1.ts.net", "100.96.1.2" }) |host|
+        try std.testing.expectEqualStrings(default, (try tailnetTarget(alloc, &env, st, host, 9000)).?);
+    try std.testing.expect(try tailnetTarget(alloc, &env, st, "elsewhere", 7277) == null);
 }
 
 test "rex protocol: a socket path is no tailnet server" {

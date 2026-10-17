@@ -311,16 +311,6 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
     if (lock_fd < 0) return error.LockFailed;
     errdefer _ = c.close(lock_fd);
     if (c.flock(lock_fd, c.LOCK.EX | c.LOCK.NB) != 0) return error.AlreadyRunning;
-    _ = c.unlink(path);
-
-    const addr = try protocol.sockaddr(path);
-    const fd = try protocol.unixSocket();
-    errdefer _ = c.close(fd);
-    if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) != 0) return error.BindFailed;
-    errdefer _ = c.unlink(path);
-    _ = c.chmod(path, 0o600);
-    if (c.listen(fd, 64) != 0) return error.ListenFailed;
-    protocol.setNonblocking(fd, true);
 
     var tailnet_fd: posix.fd_t = -1;
     errdefer if (tailnet_fd >= 0) {
@@ -342,6 +332,17 @@ pub fn create(alloc: Allocator, io: std.Io, opts: Options) !*Server {
         if (tailnet_user == null and t.allow.len == 0)
             log.warn("this node is tagged, so only users named by --allow may connect over the tailnet", .{});
     }
+
+    _ = c.unlink(path);
+
+    const addr = try protocol.sockaddr(path);
+    const fd = try protocol.unixSocket();
+    errdefer _ = c.close(fd);
+    if (c.bind(fd, @ptrCast(&addr), @sizeOf(c.sockaddr.un)) != 0) return error.BindFailed;
+    errdefer _ = c.unlink(path);
+    _ = c.chmod(path, 0o600);
+    if (c.listen(fd, 64) != 0) return error.ListenFailed;
+    protocol.setNonblocking(fd, true);
 
     var env: EnvMap = .init(alloc);
     errdefer env.deinit();
