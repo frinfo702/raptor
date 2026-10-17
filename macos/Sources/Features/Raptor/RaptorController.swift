@@ -10,13 +10,17 @@ import GhosttyKit
 /// Several windows can show one session; they follow the server, so they stay in step.
 /// Closing the window or quitting only detaches. Closing a pane or tab kills its processes.
 class RaptorController: BaseTerminalController {
-    let client: RaptorClient
+    /// The server of the session on show: this Mac's, or a tailnet machine's.
+    @Published private(set) var client: RaptorClient
     /// The connection the panes' surfaces are bound through, this window's own.
-    let stream: rap_client_t
+    private(set) var stream: rap_client_t
     @Published private(set) var session: String
 
     /// The session switcher under the session item.
     @Published var sessionPopoverIsShowing = false
+
+    /// The machines on the tailnet, over the sidebar's network button.
+    @Published var hostPickerIsShowing = false
 
     /// The tabs, in server order.
     @Published private(set) var tabs: [Tab] = []
@@ -113,13 +117,15 @@ class RaptorController: BaseTerminalController {
 
         refresh()
 
-        // Scripted screenshots open the palette (with RAPTOR_PALETTE_QUERY as its query)
-        // or the session switcher (RAPTOR_SESSIONS=1) once the window is up.
+        // Scripted screenshots open the palette (with RAPTOR_PALETTE_QUERY as its query),
+        // the session switcher (RAPTOR_SESSIONS=1) or the tailnet's machines
+        // (RAPTOR_HOSTS=1) once the window is up.
         let env = ProcessInfo.processInfo.environment
-        if env["RAPTOR_PALETTE_QUERY"] != nil || env["RAPTOR_SESSIONS"] == "1" {
+        if env["RAPTOR_PALETTE_QUERY"] != nil || env["RAPTOR_SESSIONS"] == "1" || env["RAPTOR_HOSTS"] == "1" {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
                 self?.commandPaletteIsShowing = env["RAPTOR_PALETTE_QUERY"] != nil
                 self?.sessionPopoverIsShowing = env["RAPTOR_SESSIONS"] == "1"
+                self?.hostPickerIsShowing = env["RAPTOR_HOSTS"] == "1"
             }
         }
     }
@@ -444,10 +450,10 @@ class RaptorController: BaseTerminalController {
         client.send("session.focus", ["session": session, "window": id])
     }
 
-    /// Show a tab of any session, as a sidebar row does.
-    func show(tab id: String, in session: String) {
-        client.send("session.focus", ["session": session, "window": id])
-        switchSession(to: session)
+    /// Show a tab of any session of any server, as a sidebar row does.
+    func show(tab id: String, in session: String, on server: RaptorClient) {
+        server.send("session.focus", ["session": session, "window": id])
+        switchSession(to: session, on: server)
     }
 
     func closeTab(_ id: String) {
@@ -497,10 +503,14 @@ class RaptorController: BaseTerminalController {
         client.send("session.move_block", ["session": session, "block": moved, "target": target, "direction": direction])
     }
 
-    // ponytail: reads the process name locally, which holds while the server is on this Mac.
     /// True if the block's foreground program is something other than a shell.
     private static func isBusy(_ block: String, _ client: RaptorClient) -> Bool {
         guard let p: RaptorClient.BlockProcess = client.call("block.method", ["block": block, "method": "process"]) else { return false }
+        // A tailnet machine's processes are known only by the names its server gives.
+        if client.host != nil {
+            guard let fg = p.foreground else { return false }
+            return !RaptorProgram.shells.contains(RaptorProgram.processName(fg.name, argv0: fg.argv0) ?? "")
+        }
         var name = [CChar](repeating: 0, count: 256)
         // proc_name fails (EPERM) for setuid programs such as top or sudo; shells are never setuid.
         guard proc_name(Int32(p.foreground?.pid ?? p.pid), &name, UInt32(name.count)) > 0 else { return true }
@@ -520,21 +530,31 @@ class RaptorController: BaseTerminalController {
 
     // MARK: Sessions and windows
 
-    /// Show another session in this window.
-    func switchSession(to id: String) {
+    /// Show another session in this window, one of `server`'s if given, else of this
+    /// window's server.
+    func switchSession(to id: String, on server: RaptorClient? = nil) {
+        let target = server ?? client
         switching = id
-        guard id != session else { return }
-        client.request({ $0.view(id, known: []) }, done: { [weak self] fetched in
-            guard let self, self.switching == id else { return }
-            self.switching = nil
-            guard let fetched, self.client.controllers.contains(where: { $0 === self }) else { return }
-            self.unbindAll()
-            let old = self.session
-            self.session = id
-            self.client.switched(self, from: old)
-            self.apply(fetched.view, processes: fetched.processes)
-            self.refresh()
-        })
+        guard id != session || target !== client else { return }
+        let fetch = { [weak self] in
+            target.request({ $0.view(id, known: []) }, done: { fetched in
+                guard let self, self.switching == id else { return }
+                self.switching = nil
+                guard let fetched, self.client.controllers.contains(where: { $0 === self }) else { return }
+                self.unbindAll()
+                let old = self.session
+                if target !== self.client {
+                    self.stream = target.adopt(self, from: self.client)
+                    self.client = target
+                }
+                self.session = id
+                self.client.switched(self, from: old)
+                self.apply(fetched.view, processes: fetched.processes)
+                self.refresh()
+            })
+        }
+        // Another server's panes need a connection of their own, made off the main thread.
+        if target === client { fetch() } else { target.prepareStream(fetch) }
     }
 
     /// The session a switch is headed to was destroyed, so the switch won't happen.
@@ -551,6 +571,61 @@ class RaptorController: BaseTerminalController {
             }
             self.switchSession(to: id)
         })
+    }
+
+    // MARK: Machines
+
+    /// Show a server's newest session here, making one if it has none.
+    func showNewest(on server: RaptorClient) {
+        server.request({ c in c.sessions().last?.id ?? c.createSession() }, done: { [weak self] id in
+            guard let self else { return }
+            guard let id else { return self.alert("Couldn't open a session on \(server.name)", nil) }
+            self.switchSession(to: id, on: server)
+        })
+    }
+
+    /// Show a tailnet machine's sessions here, connecting to its rap server first. With
+    /// no server there that lets us in, say how to start one instead.
+    func open(_ peer: RaptorClient.Peer) {
+        if let known = RaptorClient.Servers.shared.client(host: peer.dns) { return showNewest(on: known) }
+        guard peer.rap != .refused else { return promptInstall(peer) }
+        DispatchQueue.global().async { [weak self] in
+            let connection = RaptorClient.dial(host: peer.dns)
+            DispatchQueue.main.async {
+                guard let connection else {
+                    self?.promptInstall(peer)
+                    return
+                }
+                let server = RaptorClient.Servers.shared.add(connection, host: peer.dns, name: peer.name)
+                self?.showNewest(on: server)
+            }
+        }
+    }
+
+    /// No rap server that lets us in answers on `peer`: say so, and for a machine without
+    /// one, give the commands that install rap there and start its server on the tailnet.
+    func promptInstall(_ peer: RaptorClient.Peer) {
+        guard let window else { return }
+        let alert = NSAlert()
+        guard peer.rap != .refused else {
+            alert.messageText = "rap on \(peer.name) won't let you in"
+            alert.informativeText = "Its server lets in only its own Tailscale user and the logins it was started with --allow."
+            return alert.beginSheetModal(for: window)
+        }
+        alert.messageText = "rap isn't running on \(peer.name)"
+        alert.informativeText = "To install rap there and start its server on the tailnet, run these commands on \(peer.name), then connect again."
+        let commands = NSTextField(labelWithString: RaptorClient.installCommands)
+        commands.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        commands.isSelectable = true
+        commands.setFrameSize(commands.fittingSize)
+        alert.accessoryView = commands
+        alert.addButton(withTitle: "Copy Commands")
+        alert.addButton(withTitle: "Close")
+        alert.beginSheetModal(for: window) { response in
+            guard response == .alertFirstButtonReturn else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(RaptorClient.installCommands, forType: .string)
+        }
     }
 
     /// The session before or after this one in the server's list, wrapping around.
@@ -600,7 +675,8 @@ class RaptorController: BaseTerminalController {
     }
 
     func newWindow() {
-        client.newWindow(ghostty, session: session)
+        let (client, session) = (client, session)
+        client.prepareStream { [ghostty] in client.newWindow(ghostty, session: session) }
     }
 
     /// Ask for a name in a sheet, starting from `current`. Empty names are ignored.

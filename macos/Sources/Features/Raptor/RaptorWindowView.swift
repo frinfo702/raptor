@@ -23,7 +23,7 @@ struct RaptorWindowView: View {
         let sidebar = appearance.sidebar
         HStack(spacing: 0) {
             if sidebar {
-                RaptorSidebar(model: controller.client.sidebar, controller: controller, appearance: appearance, tokens: tokens)
+                RaptorSidebar(servers: .shared, controller: controller, appearance: appearance, tokens: tokens)
                 if !islands {
                     Rectangle()
                         .fill(Color(nsColor: tokens.hairline))
@@ -110,7 +110,7 @@ struct RaptorWindowView: View {
             }
             .padding(.trailing, 6)
             Button { controller.sessionPopoverIsShowing.toggle() } label: {
-                RaptorSessionItem(label: controller.label)
+                RaptorSessionItem(label: controller.label, server: controller.client)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -208,20 +208,21 @@ struct RaptorTitlebarButton: View {
 /// The session and the machine it runs on.
 struct RaptorSessionItem: View {
     let label: String
+    let server: RaptorClient
 
     /// The Mac's name, as Sharing in System Settings shows it.
     static let machine = SCDynamicStoreCopyComputerName(nil, nil) as String? ?? "This Mac"
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "laptopcomputer")
+            Image(systemName: server.host == nil ? "laptopcomputer" : "server.rack")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 0) {
                 Text(label)
                     .font(.system(size: 13, weight: .semibold))
                     .lineLimit(1)
-                Text(Self.machine)
+                Text(server.host == nil ? Self.machine : server.name)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

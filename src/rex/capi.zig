@@ -8,8 +8,29 @@ const Client = @import("Client.zig");
 const Feed = @import("Feed.zig");
 const Mirror = @import("Mirror.zig");
 const protocol = @import("protocol.zig");
+const tailscale = @import("tailscale.zig");
 
 const log = std.log.scoped(.rap_capi);
+
+/// The online macOS and Linux peers on the tailnet, which rap runs on, and
+/// how a rap server on each answers.
+export fn rap_tailnet_peers() ?[*:0]u8 {
+    var arena: std.heap.ArenaAllocator = .init(global.alloc());
+    defer arena.deinit();
+    return tailnetPeers(arena.allocator()) catch null;
+}
+
+fn tailnetPeers(alloc: std.mem.Allocator) !?[*:0]u8 {
+    const st = tailscale.status(alloc, global.io()) catch return null;
+    var nodes: std.ArrayList(tailscale.Node) = .empty;
+    for (st.peers) |p| if (p.online and (std.mem.eql(u8, p.os, "linux") or std.mem.eql(u8, p.os, "macOS")))
+        try nodes.append(alloc, p);
+    const Peer = struct { name: []const u8, dns: []const u8, rap: tailscale.Answer };
+    const peers = try alloc.alloc(Peer, nodes.items.len);
+    for (nodes.items, try tailscale.probe(alloc, nodes.items), peers) |n, a, *p|
+        p.* = .{ .name = n.short(), .dns = n.name, .rap = a };
+    return cString(try std.json.Stringify.valueAlloc(alloc, .{ .peers = peers }, .{}));
+}
 
 export fn rap_client_connect(socket_path: ?[*:0]const u8) ?*Client {
     return connect(socket_path) catch |err| {

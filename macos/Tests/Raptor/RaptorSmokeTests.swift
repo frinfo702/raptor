@@ -340,6 +340,99 @@ final class RaptorSmokeTests: XCTestCase {
         XCTAssertNotEqual(moves.first, moves.last, "B and A are different owners: \(owners)")
     }
 
+    /// A window moves to another server's session, as picking a tailnet machine or one
+    /// of its sidebar rows does, and back: it shows each server's block through a
+    /// connection to that server, and only that server's events reach it.
+    @MainActor
+    func testSwitchServers() throws {
+        let sockets = ["a", "b"].map { "/tmp/raptor-xctest-\($0)-\(getpid()).sock" }
+        let a = try XCTUnwrap(RaptorClient(socket: sockets[0]), "no server started from the bundled rap")
+        let b = try XCTUnwrap(RaptorClient(socket: sockets[1]), "no second server started")
+        defer {
+            for (client, socket) in zip([a, b], sockets) {
+                client.call("server.stop")
+                unlink(socket + ".lock")
+            }
+        }
+        XCTAssertTrue([a, b].allSatisfy { c in RaptorClient.Servers.shared.clients.contains { $0 === c } })
+        let ghostty = try XCTUnwrap((NSApp.delegate as? AppDelegate)?.ghostty)
+        let here: Created = try XCTUnwrap(a.call("session.create", [
+            "command": ["/bin/sh", "-c", "echo raptor-server-a; exec sleep 60"],
+        ]))
+        let there: Created = try XCTUnwrap(b.call("session.create", [
+            "command": ["/bin/sh", "-c", "echo raptor-server-b; exec sleep 60"],
+        ]))
+        let controller = a.open(ghostty, session: here.session)
+        defer { controller.window?.close() }
+
+        func shows(_ text: String) -> Bool {
+            let deadline = Date().addingTimeInterval(15)
+            while Date() < deadline {
+                if controller.surfaceTree.first?.cachedScreenContents.get().contains(text) == true { return true }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            }
+            return false
+        }
+        XCTAssertTrue(shows("raptor-server-a"))
+
+        controller.switchSession(to: there.session, on: b)
+        XCTAssertTrue(shows("raptor-server-b"), "the pane didn't bind to the other server's block")
+        XCTAssertTrue(controller.client === b)
+        XCTAssertEqual(controller.session, there.session)
+        XCTAssertFalse(a.controllers.contains { $0 === controller })
+        XCTAssertTrue(b.controllers.contains { $0 === controller })
+
+        controller.switchSession(to: here.session, on: a)
+        XCTAssertTrue(shows("raptor-server-a"), "the pane didn't come back to the first server")
+        XCTAssertTrue(controller.client === a)
+        XCTAssertFalse(b.controllers.contains { $0 === controller })
+    }
+
+    /// Picking a tailnet machine with no rap server running says so, with the commands
+    /// that install rap there and start its server, and Copy Commands copies them.
+    @MainActor
+    func testNoRapPromptsInstall() throws {
+        let socket = "/tmp/raptor-xctest-install-\(getpid()).sock"
+        let client = try XCTUnwrap(RaptorClient(socket: socket), "no server started from the bundled rap")
+        defer {
+            client.call("server.stop")
+            unlink(socket + ".lock")
+        }
+        let ghostty = try XCTUnwrap((NSApp.delegate as? AppDelegate)?.ghostty)
+        let created: Created = try XCTUnwrap(client.call("session.create", [
+            "command": ["/bin/sh", "-c", "exec sleep 60"],
+        ]))
+        defer { client.call("session.kill", ["session": created.session]) }
+        let controller = client.open(ghostty, session: created.session)
+        defer { controller.window?.close() }
+        let window = try XCTUnwrap(controller.window)
+
+        controller.open(RaptorClient.Peer(name: "box", dns: "box.tail1.ts.net", rap: .none))
+        let deadline = Date().addingTimeInterval(5)
+        while window.attachedSheet == nil && Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        let sheet = try XCTUnwrap(window.attachedSheet, "no install prompt")
+        func texts(_ view: NSView) -> [String] {
+            ((view as? NSTextField).map { [$0.stringValue] } ?? []) + view.subviews.flatMap(texts)
+        }
+        let shown = texts(try XCTUnwrap(sheet.contentView))
+        XCTAssertTrue(shown.contains("rap isn't running on box"), "\(shown)")
+        XCTAssertTrue(shown.contains(RaptorClient.installCommands), "\(shown)")
+        XCTAssertTrue(RaptorClient.installCommands.contains("install-rap.sh | sh"))
+        XCTAssertTrue(RaptorClient.installCommands.contains("rap server start --tailnet"))
+
+        let pasteboard = NSPasteboard.general
+        let saved = pasteboard.string(forType: .string)
+        defer {
+            pasteboard.clearContents()
+            if let saved { pasteboard.setString(saved, forType: .string) }
+        }
+        window.endSheet(sheet, returnCode: .alertFirstButtonReturn)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        XCTAssertEqual(pasteboard.string(forType: .string), RaptorClient.installCommands)
+    }
+
     /// The title bar's sidebar toggle and the sidebar header's eye take clicks: nothing
     /// in front of them, such as the sidebar's scroll view, swallows them.
     @MainActor
