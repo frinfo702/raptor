@@ -132,7 +132,7 @@ struct RaptorPaneHeader: View {
                 .frame(width: 16, height: 16)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.raptor)
         .help(help)
         .accessibilityLabel(help)
     }
