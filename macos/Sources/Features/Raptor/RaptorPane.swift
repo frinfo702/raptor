@@ -45,6 +45,7 @@ struct RaptorPane: View {
                 RaptorPaneHeader(
                     block: block,
                     single: controller.isSinglePane,
+                    focused: focused,
                     light: tokens.isLight,
                     split: { controller.split(surface, $0) },
                     zoom: { controller.zoom(surface) },
@@ -83,11 +84,15 @@ struct RaptorPaneHeader: View {
     let block: RaptorController.Block
     /// The pane is its tab's only one, so it can't be closed from here.
     let single: Bool
+    /// Unfocused panes show their buttons only while the pointer is over the header.
+    let focused: Bool
     /// Picks the program logo's light-theme art.
     let light: Bool
     let split: (SplitTree<Ghostty.SurfaceView>.NewDirection) -> Void
     let zoom: () -> Void
     let close: () -> Void
+
+    @State private var hovering = false
 
     var body: some View {
         HStack(spacing: 6) {
@@ -106,11 +111,17 @@ struct RaptorPaneHeader: View {
                     .disabled(single)
                     .opacity(single ? 0.35 : 1)
             }
+            .opacity(focused || hovering ? 1 : 0)
+            .allowsHitTesting(focused || hovering)
         }
         .padding(.leading, 12)
         // The buttons' 16 pt glyphs on a 24 pt pitch end 17 pt from the edge.
         .padding(.trailing, 13)
         .foregroundStyle(.primary)
+        // Hover over the header's full height, not just its glyphs.
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
     }
 
     private func button(_ symbol: String, _ help: String, action: @escaping () -> Void) -> some View {
