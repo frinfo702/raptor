@@ -235,6 +235,7 @@ final class RaptorClient: Identifiable {
             let pid: Int
             let name: String?
             let argv0: String?
+            let argv1: String?
         }
         let pid: Int
         let foreground: Foreground?
@@ -243,7 +244,7 @@ final class RaptorClient: Identifiable {
     /// The name of the block's foreground program, asked of the server.
     func foregroundName(_ block: String) -> String? {
         let p: BlockProcess? = call("block.method", ["block": block, "method": "process"])
-        return RaptorProgram.processName(p?.foreground?.name, argv0: p?.foreground?.argv0)
+        return RaptorProgram.processName(p?.foreground?.name, argv0: p?.foreground?.argv0, argv1: p?.foreground?.argv1)
     }
 
     /// The session's view, with the foreground program of each of its blocks that isn't
@@ -275,6 +276,9 @@ final class RaptorClient: Identifiable {
         struct Foreground: Decodable {
             let name: String?
             let argv0: String?
+            let argv1: String?
+
+            var processName: String? { RaptorProgram.processName(name, argv0: argv0, argv1: argv1) }
         }
     }
 
@@ -302,7 +306,7 @@ final class RaptorClient: Identifiable {
                 if let block = event.block { controller.pwdChanged(block: block, to: event.pwd ?? "") }
             case "process_changed":
                 if let block = event.block { controller.processChanged(
-                    block: block, to: RaptorProgram.processName(event.foreground?.name, argv0: event.foreground?.argv0)) }
+                    block: block, to: event.foreground?.processName) }
             case "session_view_changed", "session_label_changed", "window_label_changed":
                 controller.refresh()
             default:
@@ -318,8 +322,7 @@ final class RaptorClient: Identifiable {
         case ("pwd_changed", let block?):
             sidebar.pwdChanged(block: block, to: event.pwd ?? "")
         case ("process_changed", let block?):
-            sidebar.processChanged(
-                block: block, to: RaptorProgram.processName(event.foreground?.name, argv0: event.foreground?.argv0))
+            sidebar.processChanged(block: block, to: event.foreground?.processName)
         case ("program_status_changed", let block?) where event.id == nil:
             sidebar.statusChanged(block: block, to: event.record)
         case ("program_status_removed", let block?) where event.ids?.contains(where: { $0 == nil }) == true:

@@ -84,15 +84,44 @@ struct RaptorProgram: Equatable {
         "cursor-agent": .init(name: "Cursor", icon: .logo("cursor"), tile: rgb(0x111111), glyph: rgb(0xEDEDED), isAgent: true),
         "copilot": .init(name: "Copilot", icon: .logo("copilot"), tile: rgb(0x24292F), glyph: rgb(0xFFFFFF), isAgent: true),
         "gemini": .init(name: "Gemini", icon: .symbol("sparkle"), tile: rgb(0x2F4F7A), glyph: rgb(0xBFD8F5), isAgent: true),
+        "pi": .init(name: "Pi", icon: .logo("pi"), tile: rgb(0x1E1E1E), glyph: rgb(0xEDEDED), isAgent: true),
+        "kilo": .init(name: "Kilo", icon: .logo("kilo"), tile: rgb(0xF8F675), glyph: rgb(0x111111), isAgent: true),
+        "kilocode": .init(name: "Kilo", icon: .logo("kilo"), tile: rgb(0xF8F675), glyph: rgb(0x111111), isAgent: true),
+        "kimi": .init(name: "Kimi", icon: .logo("moonshot"), tile: rgb(0x16191E), glyph: rgb(0xFFFFFF), isAgent: true),
+        "aider": .init(name: "Aider", icon: .text("A"), tile: rgb(0x14B014), glyph: rgb(0xFFFFFF), isAgent: true),
+        "amp": .init(name: "Amp", icon: .symbol("bolt.fill"), tile: rgb(0x111111), glyph: rgb(0xF34E3F), isAgent: true),
+        "goose": .init(name: "Goose", icon: .text("G"), tile: rgb(0x111111), glyph: rgb(0xEDEDED), isAgent: true),
+        "qwen": .init(name: "Qwen Code", icon: .text("Q"), tile: rgb(0x615CED), glyph: rgb(0xFFFFFF), isAgent: true),
+        "crush": .init(name: "Crush", icon: .symbol("heart.fill"), tile: rgb(0x6B50FF), glyph: rgb(0xFF60FF), isAgent: true),
+        "droid": .init(name: "Droid", icon: .text("D"), tile: rgb(0x111111), glyph: rgb(0xEE6018), isAgent: true),
+        "auggie": .init(name: "Auggie", icon: .text("A"), tile: rgb(0x1A1A1A), glyph: rgb(0xEDEDED), isAgent: true),
+        "kiro-cli": .init(name: "Kiro", icon: .logo("kiro"), tile: rgb(0x993FF5), glyph: rgb(0xFFFFFF), isAgent: true),
+        "cline": .init(name: "Cline", icon: .text("C"), tile: rgb(0x111111), glyph: rgb(0xEDEDED), isAgent: true),
+        "openhands": .init(name: "OpenHands", icon: .symbol("hand.raised.fill"), tile: rgb(0x1E1E1E), glyph: rgb(0xFFE165), isAgent: true),
+        "grok": .init(name: "Grok", icon: .text("X"), tile: rgb(0x111111), glyph: rgb(0xEDEDED), isAgent: true),
     ]
 
+    /// Interpreters that name a program only by the script they run: `node …/bin/gemini`.
+    private static let interpreters: Set<String> = ["node", "bun", "deno", "python", "python3", "ruby"]
+
     /// The name a process goes by: the name it was run as (argv[0], without a login shell's
-    /// "-") if Raptor knows it, else its command name. Claude Code's binary is named for its
-    /// version ("2.1.299") but run as "claude"; Cursor's agent is node run as "cursor-agent".
-    static func processName(_ name: String?, argv0: String?) -> String? {
+    /// "-") if Raptor knows it; else, for an interpreter, the agent script it runs (argv[1]);
+    /// else its command name. Claude Code's binary is named for its version ("2.1.299") but
+    /// run as "claude"; Cursor's agent is node run as "cursor-agent"; Gemini, Pi and Kilo
+    /// are `node …/bin/gemini`, Aider `python3 …/bin/aider`.
+    static func processName(_ name: String?, argv0: String?, argv1: String? = nil) -> String? {
         let known = { (n: String) in shells.contains(n) || Self.known[n] != nil || cards[n] != nil }
         guard let argv0 else { return name }
         let runAs = String((argv0 as NSString).lastPathComponent.drop { $0 == "-" })
+        // macOS's python3 runs as its framework's "Python", Homebrew's as "python3.13".
+        let interpreter = { (n: String) in
+            let n = n.lowercased()
+            return interpreters.contains(n) || n.hasPrefix("python")
+        }
+        if let argv1, interpreter(runAs) || interpreter(name ?? "") {
+            let script = (argv1 as NSString).lastPathComponent
+            if Self.known[script]?.isAgent == true { return script }
+        }
         return known(runAs) ? runAs : name
     }
 

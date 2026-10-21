@@ -3,7 +3,7 @@ import Testing
 @testable import Ghostty
 
 /// The sidebar's rows: sessions and their tabs, tabs made by another tab's program
-/// nested under it, and Activity Mode's filter.
+/// nested under it, and the agents-only filter.
 struct RaptorSidebarTests {
     typealias Model = RaptorSidebarModel
 
@@ -20,7 +20,7 @@ struct RaptorSidebarTests {
             tab: .init(id: id, title: id, program: agent ? RaptorProgram.identify("claude")! : .shell, others: []),
             session: session,
             status: status.map { .init(state: $0, msg: nil, updated_at: 0) },
-            hasAgent: agent,
+            agents: agent ? [.init(block: "block:\(id)", program: RaptorProgram.identify("claude")!, title: id, status: nil)] : [],
             parent: parent,
             blocks: ["block:\(id)"],
             checkout: repo.map { RaptorGitCheckout(commonDir: $0, isLinked: linked) })
@@ -89,19 +89,30 @@ struct RaptorSidebarTests {
         #expect(outline(Model.rows(sessions, activity: false)) == ["#a", "orphan", "self"])
     }
 
-    @Test func activityKeepsOnlyAgentsAndStatuses() {
+    @Test func agentsOnlyKeepsOnlyAgents() {
         let sessions = [
             Model.Session(id: "a", label: "a", tabs: [tab("agent", "a", agent: true), tab("shell", "a")]),
+            // A program's status alone doesn't make it an agent.
             Model.Session(id: "b", label: "b", tabs: [tab("brew", "b", status: "done")]),
             Model.Session(id: "c", label: "c", tabs: [tab("nvim", "c")]),
         ]
-        #expect(outline(Model.rows(sessions, activity: true)) == ["#a", "agent", "#b", "brew"])
+        #expect(outline(Model.rows(sessions, activity: true)) == ["#a", "agent"])
+        #expect(outline(Model.rows(sessions, activity: false)) == ["#a", "agent", "shell", "#b", "brew", "#c", "nvim"])
+    }
+
+    @Test func agentTitlesSayWhetherTheyWork() {
+        #expect(Model.titleSaysWorking("⠐ Fix the build"))
+        #expect(!Model.titleSaysWorking("✳ Fix the build"))
+        #expect(!Model.titleSaysWorking("Fix the build"))
+        #expect(Model.agentTitle("⠐ Fix the build") == "Fix the build")
+        #expect(Model.agentTitle("✳ Fix the build") == "Fix the build")
+        #expect(Model.agentTitle("Claude ~/src") == "Claude ~/src")
     }
 
     @Test func activityMovesAKeptChildOfAHiddenTabUp() {
         let sessions = [Model.Session(id: "a", label: "a", tabs: [
             tab("shell", "a"),
-            tab("codex", "a", status: "working", parent: "block:shell"),
+            tab("codex", "a", status: "working", agent: true, parent: "block:shell"),
         ])]
         #expect(outline(Model.rows(sessions, activity: false)) == ["#a", "shell", "  codex"])
         #expect(outline(Model.rows(sessions, activity: true)) == ["#a", "codex"])
@@ -139,9 +150,9 @@ struct RaptorSidebarTests {
         ])
         // With the agent filtered out of sight its worktree tab falls back to the checkout.
         let hidden = [Model.Session(id: "a", label: "a", tabs: [
-            tab("main", "a", status: "done", repo: "/r/.git"),
+            tab("main", "a", agent: true, repo: "/r/.git"),
             tab("lead", "a"),
-            tab("sub", "a", status: "working", parent: "block:lead", repo: "/r/.git", linked: true),
+            tab("sub", "a", agent: true, parent: "block:lead", repo: "/r/.git", linked: true),
         ])]
         #expect(outline(Model.rows(hidden, activity: true)) == ["#a", "main", "  sub"])
     }
@@ -182,9 +193,9 @@ struct RaptorSidebarTests {
     @Test func activityModeCapsDepthTheSameWay() {
         let sessions = [Model.Session(id: "a", label: "a", tabs: [
             tab("lead", "a", agent: true),
-            tab("sub", "a", status: "working", parent: "block:lead"),
-            tab("subsub", "a", status: "working", parent: "block:sub"),
-            tab("deep", "a", status: "working", parent: "block:subsub"),
+            tab("sub", "a", agent: true, parent: "block:lead"),
+            tab("subsub", "a", agent: true, parent: "block:sub"),
+            tab("deep", "a", agent: true, parent: "block:subsub"),
         ])]
         #expect(outline(Model.rows(sessions, activity: true)) == ["#a", "lead", "  sub", "    subsub", "      …"])
     }

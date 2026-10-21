@@ -102,8 +102,8 @@ final class RaptorAppearance: ObservableObject {
     }
     /// The vertical sidebar of every session's tabs, in place of the tab strip.
     @Published var sidebar: Bool { didSet { save(sidebar, Keys.sidebar) } }
-    /// Activity Mode: the sidebar shows only tabs with an agent or a program status,
-    /// each with its status line.
+    /// The eye closed: the sidebar shows only tabs running a coding agent, each with
+    /// its status line.
     @Published var activity: Bool { didSet { save(activity, Keys.activity) } }
     @Published var paddingColor: PaddingColor {
         didSet {

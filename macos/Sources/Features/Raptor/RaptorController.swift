@@ -531,7 +531,7 @@ class RaptorController: BaseTerminalController {
         // A tailnet machine's processes are known only by the names its server gives.
         if client.host != nil {
             guard let fg = p.foreground else { return false }
-            return !RaptorProgram.shells.contains(RaptorProgram.processName(fg.name, argv0: fg.argv0) ?? "")
+            return !RaptorProgram.shells.contains(RaptorProgram.processName(fg.name, argv0: fg.argv0, argv1: fg.argv1) ?? "")
         }
         var name = [CChar](repeating: 0, count: 256)
         // proc_name fails (EPERM) for setuid programs such as top or sudo; shells are never setuid.
@@ -742,7 +742,8 @@ class RaptorController: BaseTerminalController {
     @IBAction func toggleSidebar(_ sender: Any?) { RaptorAppearance.shared.sidebar.toggle() }
     @IBAction func toggleActivity(_ sender: Any?) { Self.toggleActivity() }
 
-    /// Activity Mode's filter. A hidden sidebar comes back showing activity.
+    /// The eye: every tab, or only those running an agent. A hidden sidebar comes back
+    /// showing only agents.
     static func toggleActivity() {
         let appearance = RaptorAppearance.shared
         guard appearance.sidebar else {
@@ -832,7 +833,7 @@ class RaptorController: BaseTerminalController {
             RaptorCommand(title: appearance.sidebar ? "Hide Sidebar" : "Show Sidebar", shortcut: ["⌃", "⌘", "S"]) {
                 appearance.sidebar.toggle()
             },
-            RaptorCommand(title: appearance.activity ? "Hide Activity" : "Show Activity", shortcut: ["⇧", "⌘", "A"]) {
+            RaptorCommand(title: appearance.activity ? "Show All Tabs" : "Show Only Agents", shortcut: ["⇧", "⌘", "A"]) {
                 Self.toggleActivity()
             },
             command("Split Pane Right", "new_split:right"),
@@ -910,7 +911,7 @@ extension RaptorController {
         add("Close Session…", #selector(closeSession(_:)))
         menu.addItem(.separator())
         add("Toggle Sidebar", #selector(toggleSidebar(_:)), "s", [.command, .control])
-        add("Show Activity", #selector(toggleActivity(_:)), "a", [.command, .shift])
+        add("Show Only Agents", #selector(toggleActivity(_:)), "a", [.command, .shift])
         let item = NSMenuItem(title: "Session", action: nil, keyEquivalent: "")
         item.submenu = menu
         let file = main.items.firstIndex { $0.title == "File" } ?? 0
