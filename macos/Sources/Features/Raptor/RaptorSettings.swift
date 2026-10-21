@@ -39,6 +39,11 @@ struct RaptorSettingsView: View {
                 }
                 .disabled(appearance.effectiveStyle == .solid)
             }
+            Section("Panes") {
+                Picker("Focus after closing a pane", selection: $appearance.closeFocus) {
+                    ForEach(RaptorAppearance.CloseFocus.allCases) { Text($0.name).tag($0) }
+                }
+            }
             Section {
                 Button("Open Config File…") {
                     (NSApp.delegate as? AppDelegate)?.ghostty.openConfig()

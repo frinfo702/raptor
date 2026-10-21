@@ -251,6 +251,10 @@ class RaptorController: BaseTerminalController {
         activeTab = view.active_window
         let tree = trees[view.active_window] ?? .init()
         let reshaped = tree.root != surfaceTree.root || tree.zoomed != surfaceTree.zoomed
+        // The server focuses the pane bordering a closed focused one; Settings can
+        // send focus to the first pane instead.
+        let first = RaptorAppearance.shared.closeFocus == .first && !switched
+            && focusedPane.map({ !tree.contains($0) }) == true ? tree.root?.leftmostLeaf() : nil
         if reshaped {
             applyingView = true
             surfaceTree = tree
@@ -262,7 +266,7 @@ class RaptorController: BaseTerminalController {
         // counts too: removing a pane leaves the window itself as first responder.
         if let w = view.windows.first(where: { $0.id == view.active_window }),
            switched || reshaped || w.focused_block != focusedBefore || focusedSurface.map({ !tree.contains($0) }) ?? true,
-           let target = surfaces[w.focused_block] {
+           let target = first ?? surfaces[w.focused_block] {
             if window?.isKeyWindow != true,
                client.controllers.contains(where: { $0 !== self && $0.session == session }) {
                 if (window?.firstResponder as? Ghostty.SurfaceView).map({ !tree.contains($0) }) ?? true {

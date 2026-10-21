@@ -44,6 +44,23 @@ final class RaptorAppearance: ObservableObject {
         }
     }
 
+    /// Which pane takes focus when the focused one closes.
+    enum CloseFocus: String, CaseIterable, Identifiable {
+        /// The pane bordering it, which takes its space.
+        case adjacent
+        /// The window's top-left pane.
+        case first
+
+        var id: Self { self }
+
+        var name: String {
+            switch self {
+            case .adjacent: "Adjacent pane"
+            case .first: "First pane"
+            }
+        }
+    }
+
     /// Ghostty's window-padding-color: what fills the padding around the cells.
     enum PaddingColor: String, CaseIterable, Identifiable {
         case background
@@ -95,6 +112,8 @@ final class RaptorAppearance: ObservableObject {
         }
     }
 
+    @Published var closeFocus: CloseFocus { didSet { save(closeFocus.rawValue, Keys.closeFocus) } }
+
     private enum Keys {
         static let style = "RaptorInterfaceStyle"
         static let density = "RaptorPaneDensity"
@@ -104,6 +123,7 @@ final class RaptorAppearance: ObservableObject {
         static let paddingColor = "RaptorPaddingColor"
         static let sidebar = "RaptorSidebar"
         static let activity = "RaptorActivity"
+        static let closeFocus = "RaptorCloseFocus"
     }
 
     private let defaults: UserDefaults
@@ -120,6 +140,7 @@ final class RaptorAppearance: ObservableObject {
         fontSmoothing = defaults.bool(forKey: Keys.fontSmoothing)
         sidebar = value(Keys.sidebar, "RAPTOR_SIDEBAR").map { $0 == "1" || $0 == "true" } ?? true
         activity = value(Keys.activity, "RAPTOR_ACTIVITY").map { $0 == "1" || $0 == "true" } ?? false
+        closeFocus = defaults.string(forKey: Keys.closeFocus).flatMap(CloseFocus.init) ?? .adjacent
         paddingColor = defaults.string(forKey: Keys.paddingColor).flatMap(PaddingColor.init) ?? .background
     }
 
