@@ -108,6 +108,18 @@ final class RaptorSidebarModel: ObservableObject {
         rebuild()
     }
 
+    /// Move a tab to another's place now, as the server is asked to, so a dropped row
+    /// doesn't jump back until the server's view arrives.
+    func move(_ id: String, onto target: String, in session: String) {
+        guard let s = views.firstIndex(where: { $0.id == session }) else { return }
+        var windows = views[s].view.windows
+        guard let from = windows.firstIndex(where: { $0.id == id }),
+              let to = windows.firstIndex(where: { $0.id == target }) else { return }
+        windows.insert(windows.remove(at: from), at: to)
+        views[s].view.windows = windows
+        rebuild()
+    }
+
     private func update(_ block: String, _ change: (inout RaptorController.Block) -> Void) {
         guard var b = blocks[block] else { return }
         change(&b)
@@ -263,6 +275,30 @@ final class RaptorSidebarModel: ObservableObject {
         return rows
     }
 
+    /// The tabs a dragged tab can trade places with, itself among them: those under the
+    /// same parent, in order, each with the rows it and its nested tabs take.
+    static func siblings(of id: String, in rows: [Row]) -> [(id: String, rows: Range<Int>)] {
+        func depth(_ row: Row) -> Int? {
+            switch row {
+            case .tab(_, let b), .more(_, _, let b): b.depth
+            case .session: nil
+            }
+        }
+        guard let r = rows.firstIndex(where: { $0.id == id }), case .tab(_, let branch) = rows[r] else { return [] }
+        var lo = r, hi = r + 1
+        while lo > 0, let d = depth(rows[lo - 1]), d >= branch.depth { lo -= 1 }
+        while hi < rows.count, let d = depth(rows[hi]), d >= branch.depth { hi += 1 }
+        var siblings: [(id: String, rows: Range<Int>)] = []
+        for i in lo..<hi {
+            if case .tab(let t, let b) = rows[i], b.depth == branch.depth {
+                siblings.append((t.id, i..<i + 1))
+            } else if let last = siblings.last {
+                siblings[siblings.count - 1].rows = last.rows.lowerBound..<i + 1
+            }
+        }
+        return siblings
+    }
+
     /// How long ago, as Rex shows it: "now", then minutes, hours and days.
     static func age(_ date: Date, now: Date) -> String {
         let s = max(0, now.timeIntervalSince(date))
@@ -395,40 +431,90 @@ struct RaptorSidebarServer: View {
     let activity: Bool
     let tokens: ThemeTokens
 
+    /// A tab dragged up or down among its siblings, as the strip's tabs are dragged
+    /// along it: it follows the pointer by `dy`, with the tabs nested under it.
+    struct Drag: Equatable {
+        let id: String
+        var dy: CGFloat
+    }
+
+    @State private var drag: Drag?
+
     var body: some View {
         let rows = RaptorSidebarModel.rows(model.sessions, activity: activity)
         let shown = server === controller.client
+        let plan = drag.flatMap { plan($0, rows) }
         VStack(spacing: 0) {
             RaptorSidebarHost(name: server.name, symbol: server.host == nil ? "laptopcomputer" : "server.rack")
-            ForEach(rows) { row in
-                switch row {
-                case .session(_, let label, let first):
-                    RaptorSidebarSessionHeader(label: label, first: first)
-                        .transition(.opacity)
-                case .tab(let tab, let branch):
-                    RaptorSidebarRow(
-                        tab: tab,
-                        branch: branch,
-                        selected: shown && tab.session == controller.session && tab.id == controller.activeTab,
-                        activity: activity,
-                        tokens: tokens
-                    ) {
-                        controller.show(tab: tab.id, in: tab.session, on: server)
+            ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
+                let block = plan?.siblings.firstIndex { $0.rows.contains(i) }
+                let dragged = block != nil && block == plan?.reorder.from
+                let offset = block.flatMap { plan?.reorder.offset(of: $0, drag?.dy ?? 0) } ?? 0
+                Group {
+                    switch row {
+                    case .session(_, let label, let first):
+                        RaptorSidebarSessionHeader(label: label, first: first)
+                    case .tab(let tab, let branch):
+                        RaptorSidebarRow(
+                            tab: tab,
+                            branch: branch,
+                            selected: shown && tab.session == controller.session && tab.id == controller.activeTab,
+                            activity: activity,
+                            tokens: tokens,
+                            select: { controller.show(tab: tab.id, in: tab.session, on: server) },
+                            slide: { slide(tab, by: $0?.height, rows: rows) })
+                    case .more(_, let hidden, let branch):
+                        RaptorSidebarMore(
+                            branch: branch,
+                            selected: shown && hidden.contains {
+                                $0.session == controller.session && $0.id == controller.activeTab
+                            },
+                            activity: activity,
+                            tokens: tokens
+                        )
                     }
-                    .transition(.opacity)
-                case .more(_, let hidden, let branch):
-                    RaptorSidebarMore(
-                        branch: branch,
-                        selected: shown && hidden.contains {
-                            $0.session == controller.session && $0.id == controller.activeTab
-                        },
-                        activity: activity,
-                        tokens: tokens
-                    )
-                    .transition(.opacity)
                 }
+                // The dragged rows hide the ones they pass over.
+                .background(RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .fill(Color(nsColor: tokens.chrome))
+                    .padding(.horizontal, RaptorSidebar.selectionInset)
+                    .padding(.vertical, 1.5)
+                    .opacity(dragged ? 1 : 0))
+                .offset(y: offset)
+                // The dragged rows keep up with the pointer; the others slide.
+                .animation(dragged ? nil : RaptorTabStrip.slide, value: offset)
+                .zIndex(dragged ? 1 : 0)
+                .transition(.opacity)
             }
         }
+    }
+
+    /// The dragged tab's siblings, and the column of rows they make.
+    private func plan(_ drag: Drag, _ rows: [RaptorSidebarModel.Row]) -> (siblings: [(id: String, rows: Range<Int>)], reorder: RaptorReorder)? {
+        let siblings = RaptorSidebarModel.siblings(of: drag.id, in: rows)
+        guard let from = siblings.firstIndex(where: { $0.id == drag.id }) else { return nil }
+        let height = activity ? RaptorSidebar.activityRowHeight : RaptorSidebar.rowHeight
+        return (siblings, RaptorReorder(lengths: siblings.map { CGFloat($0.rows.count) * height }, from: from))
+    }
+
+    /// Follow the pointer with a dragged tab, kept among its siblings; nil drops it in its
+    /// new place, which shows at once and is sent to the server.
+    private func slide(_ tab: RaptorSidebarModel.Tab, by dy: CGFloat?, rows: [RaptorSidebarModel.Row]) {
+        guard let dy else {
+            guard let drag, let plan = plan(drag, rows) else { return }
+            let to = plan.reorder.destination(drag.dy)
+            withAnimation(RaptorTabStrip.slide) {
+                if to != plan.reorder.from {
+                    let target = plan.siblings[to].id
+                    model.move(tab.id, onto: target, in: tab.session)
+                    controller.moveTab(tab.id, onto: target, in: tab.session, on: server)
+                }
+                self.drag = nil
+            }
+            return
+        }
+        guard let plan = plan(Drag(id: tab.id, dy: 0), rows) else { return }
+        drag = Drag(id: tab.id, dy: plan.reorder.clamp(dy))
     }
 }
 
@@ -619,6 +705,8 @@ struct RaptorSidebarRow: View {
     let activity: Bool
     let tokens: ThemeTokens
     let select: () -> Void
+    /// This row dragged by so much, nil when it's let go.
+    let slide: (CGSize?) -> Void
 
     @State private var hovering = false
 
@@ -672,14 +760,13 @@ struct RaptorSidebarRow: View {
             Self.pill(selected: selected, hovering: hovering, height: height, activity: activity, tokens: tokens)
         }
         .contentShape(Rectangle())
-        .onHover { hovering = $0 }
+        .overlay(RaptorTabHandle(select: select, slide: slide) { hovering = $0 })
         .padding(.horizontal, RaptorSidebar.selectionInset)
         .frame(height: height)
         .background(alignment: .leading) {
             RaptorTreeConnector(branch: branch)
                 .padding(.leading, RaptorSidebar.selectionInset + 10)
         }
-        .onTapGesture(perform: select)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)

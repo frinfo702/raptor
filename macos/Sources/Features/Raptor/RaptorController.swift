@@ -155,7 +155,8 @@ class RaptorController: BaseTerminalController {
     struct SessionView: Decodable {
         let label: String
         let active_window: String
-        let windows: [Window]
+        /// In server order; a dropped tab moves here before the server's view arrives.
+        var windows: [Window]
 
         struct Window: Decodable {
             let id: String
@@ -454,6 +455,19 @@ class RaptorController: BaseTerminalController {
     func show(tab id: String, in session: String, on server: RaptorClient) {
         server.send("session.focus", ["session": session, "window": id])
         switchSession(to: session, on: server)
+    }
+
+    /// Move a tab to another's place in its session, as one dropped on it in the strip
+    /// or the sidebar.
+    func moveTab(_ id: String, onto target: String, in session: String? = nil, on server: RaptorClient? = nil) {
+        let server = server ?? client, session = session ?? self.session
+        // This window's tabs move now, so a dropped tab doesn't jump back until the
+        // server's view arrives.
+        if server === client, session == self.session,
+           let from = tabs.firstIndex(where: { $0.id == id }), let to = tabs.firstIndex(where: { $0.id == target }) {
+            tabs.insert(tabs.remove(at: from), at: to)
+        }
+        server.send("session.move_window", ["session": session, "window": id, "target": target])
     }
 
     func closeTab(_ id: String) {
