@@ -498,7 +498,7 @@ struct RaptorSidebarServer: View {
     var body: some View {
         let rows = RaptorSidebarModel.rows(model.sessions, activity: activity)
         let shown = server === controller.client
-        let plan = drag.flatMap { plan($0, rows) }
+        let plan = drag.flatMap { self.plan($0, rows) }
         VStack(spacing: 0) {
             RaptorSidebarHost(name: server.name, symbol: server.host == nil ? "laptopcomputer" : "server.rack")
             ForEach(Array(rows.enumerated()), id: \.element.id) { i, row in
