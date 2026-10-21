@@ -211,6 +211,42 @@ struct RaptorSidebarTests {
         #expect(Model.statusLine(.init(state: "done", msg: "Upgraded 12 packages", updated_at: 0)) == "Upgraded 12 packages")
         #expect(Model.statusLine(nil) == "Idle")
     }
+
+    /// A dragged tab trades places only with tabs under the same parent, each taking
+    /// the rows of the tabs nested under it along.
+    @Test func draggedTabsTradePlacesWithSiblings() {
+        let rows = Model.rows([
+            Model.Session(id: "a", label: "a", tabs: [
+                tab("one", "a"),
+                tab("two", "a"),
+                tab("kid", "a", parent: "block:two"),
+                tab("three", "a"),
+            ]),
+            Model.Session(id: "b", label: "b", tabs: [tab("b1", "b")]),
+        ], activity: false)
+        #expect(outline(rows) == ["#a", "one", "two", "  kid", "three", "#b", "b1"])
+        let roots = Model.siblings(of: "two", in: rows)
+        #expect(roots.map(\.id) == ["one", "two", "three"])
+        #expect(roots.map(\.rows) == [1..<2, 2..<4, 4..<5])
+        #expect(Model.siblings(of: "kid", in: rows).map(\.id) == ["kid"])
+        #expect(Model.siblings(of: "b1", in: rows).map(\.id) == ["b1"])
+    }
+
+    /// The other items slide aside as a dragged one passes their middles, and the
+    /// longest still reaches either end.
+    @Test func reorderSlidesItemsAside() {
+        let row = RaptorReorder(lengths: [100, 50, 50], gap: 1, from: 0)
+        #expect(row.clamp(500) == 102)
+        #expect(row.clamp(-10) == 0)
+        #expect(row.destination(0) == 0)
+        #expect(row.destination(30) == 1)
+        #expect(row.offset(of: 1, 30) == -101)
+        #expect(row.offset(of: 2, 30) == 0)
+        #expect(row.destination(row.clamp(500)) == 2)
+        let back = RaptorReorder(lengths: [50, 50, 100], gap: 1, from: 2)
+        #expect(back.destination(back.clamp(-500)) == 0)
+        #expect(back.offset(of: 0, -500) == 101)
+    }
 }
 
 /// Finding a directory's repository and whether it is a linked worktree, as git does.

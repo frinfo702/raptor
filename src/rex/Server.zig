@@ -1769,6 +1769,7 @@ const methods = std.StaticStringMap(Handler).initComptime(.{
     .{ "session.new_split", &sessionNewSplit },
     .{ "session.move_block", &sessionMoveBlock },
     .{ "session.resize_split", &sessionResizeSplit },
+    .{ "session.move_window", &sessionMoveWindow },
     .{ "session.close_window", &sessionCloseWindow },
     .{ "session.zoom_block", &sessionZoomBlock },
     .{ "session.focus", &sessionFocus },
@@ -2233,6 +2234,24 @@ fn sessionResizeSplit(self: *Server, req: *Request, w: *Stringify) Error!void {
     try w.write(.{});
 }
 
+/// Move a window to another's place in its session's order, as a tab
+/// dropped on another tab.
+fn sessionMoveWindow(self: *Server, req: *Request, w: *Stringify) Error!void {
+    const t = try self.resolve(req);
+    const q = req.str("target") orelse return req.fail(error.Usage, "target is required", .{});
+    const target = try match(Window, "window", t.session.windows.items, q, req);
+    const items = t.session.windows.items;
+    const from = std.mem.indexOfScalar(*Window, items, t.window).?;
+    const to = std.mem.indexOfScalar(*Window, items, target).?;
+    if (from < to)
+        std.mem.copyForwards(*Window, items[from..to], items[from + 1 .. to + 1])
+    else
+        std.mem.copyBackwards(*Window, items[to + 1 .. from + 1], items[to..from]);
+    items[to] = t.window;
+    self.viewChanged(t.session);
+    try w.write(.{});
+}
+
 fn sessionCloseWindow(self: *Server, req: *Request, w: *Stringify) Error!void {
     self.closeWindow((try self.resolve(req)).window);
     try w.write(.{});
@@ -2666,6 +2685,19 @@ test "rex Server: sessions over the socket" {
     defer alloc.free(needle);
     try testing.expectEqual(1, std.mem.count(u8, family, needle));
     try testing.expectEqual(3, std.mem.count(u8, family, "\"parent\":null"));
+
+    // A window moved onto the last one takes its place at the end.
+    const moved_window = try T.call(fd,
+        \\{"id":56,"method":"session.move_window","params":{"session":"demo","window":"Primary","target":"4"}}
+    );
+    defer alloc.free(moved_window);
+    try testing.expect(std.mem.indexOf(u8, moved_window, "\"error\"") == null);
+    const reordered = try T.call(fd,
+        \\{"id":57,"method":"session.view","params":{"session":"demo"}}
+    );
+    defer alloc.free(reordered);
+    try testing.expect(std.mem.indexOf(u8, reordered, "\"label\":\"Primary\"").? >
+        std.mem.lastIndexOf(u8, reordered, "\"label\":\"Window ").?);
 
     const killed = try T.call(fd,
         \\{"id":6,"method":"session.kill","params":{"session":"demo"}}
