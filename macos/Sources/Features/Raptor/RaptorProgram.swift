@@ -60,7 +60,7 @@ struct RaptorProgram: Equatable {
         "vim": .init(name: "Vim", icon: .logo("vim"), tile: rgb(0x1F5F2E), glyph: rgb(0x9BE39F)),
         "hx": .init(name: "Helix", icon: .symbol("chevron.left.forwardslash.chevron.right"), tile: rgb(0x4B3A6E), glyph: rgb(0xD2C2F5)),
         "node": .init(name: "Node", icon: .logo("nodejs"), tile: rgb(0x3A4A3A), glyph: rgb(0xC9D1C9)),
-        "bun": .init(name: "Bun", icon: .symbol("circle.dotted"), tile: rgb(0xF2E8DC), glyph: rgb(0x3A3028)),
+        "bun": .init(name: "Bun", icon: .logo("bun"), tile: rgb(0xF2E8DC), glyph: rgb(0x3A3028)),
         "deno": .init(name: "Deno", icon: .symbol("circle.fill"), tile: rgb(0x2A2A2A), glyph: rgb(0xEDEDED)),
         "python": .init(name: "Python", icon: .logo("python"), tile: rgb(0x2F4F7A), glyph: rgb(0xF5D76E)),
         "python3": .init(name: "Python", icon: .logo("python"), tile: rgb(0x2F4F7A), glyph: rgb(0xF5D76E)),
