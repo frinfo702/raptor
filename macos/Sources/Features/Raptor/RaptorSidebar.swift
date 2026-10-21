@@ -9,8 +9,9 @@ final class RaptorSidebarModel: ObservableObject {
         let tab: RaptorController.Tab
         let session: String
         let status: RaptorController.SessionView.Status?
-        /// Some pane runs an agent, which Activity Mode shows even without a status.
-        let hasAgent: Bool
+        /// The panes running a coding agent, in the tab's order. Agents-only mode keeps
+        /// only tabs with one.
+        let agents: [Agent]
         /// The block whose program made this tab.
         let parent: String?
         let blocks: [String]
@@ -19,6 +20,19 @@ final class RaptorSidebarModel: ObservableObject {
 
         var id: String { tab.id }
         var isWorking: Bool { status?.state == "working" }
+        var hasAgent: Bool { !agents.isEmpty }
+        /// The agent a row in agents-only mode speaks for: a working one, else the first.
+        var lead: Agent? { agents.first(where: { $0.status?.state == "working" }) ?? agents.first }
+        /// Rows for agents, and for programs that report a status, add a status line.
+        var hasStatusLine: Bool { hasAgent || status != nil }
+    }
+
+    /// A pane running a coding agent, and what it is doing.
+    struct Agent: Equatable {
+        let block: String
+        let program: RaptorProgram
+        let title: String
+        let status: RaptorController.SessionView.Status?
     }
 
     struct Session: Identifiable, Equatable {
@@ -34,6 +48,9 @@ final class RaptorSidebarModel: ObservableObject {
     private var views: [(id: String, view: RaptorController.SessionView)] = []
     private var blocks: [String: RaptorController.Block] = [:]
     private var statuses: [String: RaptorController.SessionView.Status] = [:]
+    /// Agents' statuses read from their titles, for agents that don't report one, kept
+    /// so how long ago it changed survives title updates.
+    private var titleStatuses: [String: RaptorController.SessionView.Status] = [:]
     // ponytail: never forgotten, so a directory that becomes a repo or worktree after it
     // was first seen is noticed only on the next launch.
     /// Checkouts by directory, nil where there is none.
@@ -117,24 +134,60 @@ final class RaptorSidebarModel: ObservableObject {
     }
 
     private func rebuild() {
+        titleStatuses = titleStatuses.filter { blocks[$0.key]?.program.isAgent == true }
         let sessions = views.map { id, view in
             Session(id: id, label: view.label, tabs: view.windows.map { w in
                 let ids = w.blocks.map(\.id)
+                let agents = ids.compactMap { b -> Agent? in
+                    guard let block = blocks[b], block.program.isAgent else { return nil }
+                    return Agent(
+                        block: b,
+                        program: block.program,
+                        title: Self.agentTitle(block.headerTitle),
+                        status: statuses[b] ?? titleStatus(b, title: block.title))
+                }
                 // A working pane speaks for its tab, else the latest news does.
-                let status = ids.compactMap { statuses[$0] }.max {
+                let status = (ids.compactMap { statuses[$0] } + agents.compactMap(\.status)).max {
                     ($0.state == "working" ? 1 : 0, $0.updated_at) < ($1.state == "working" ? 1 : 0, $1.updated_at)
                 }
                 return Tab(
                     tab: RaptorController.tab(w, blocks: blocks),
                     session: id,
                     status: status,
-                    hasAgent: ids.contains { blocks[$0]?.program.isAgent == true },
+                    agents: agents,
                     parent: w.parent,
                     blocks: ids,
                     checkout: checkout(blocks[w.focused_block]?.pwd ?? ""))
             })
         }
         if sessions != self.sessions { self.sessions = sessions }
+    }
+
+    /// An agent that reports no status still shows whether it works: its title.
+    private func titleStatus(_ block: String, title: String) -> RaptorController.SessionView.Status {
+        let state = Self.titleSaysWorking(title) ? "working" : "idle"
+        if let known = titleStatuses[block], known.state == state { return known }
+        let status = RaptorController.SessionView.Status(
+            state: state, msg: nil, updated_at: Int64(Date().timeIntervalSince1970 * 1000))
+        titleStatuses[block] = status
+        return status
+    }
+
+    // ponytail: Claude Code, Gemini, Codex and others put a braille spinner at the start
+    // of their title while they work; an agent that doesn't reads as idle until it
+    // reports OSC 7501.
+    /// Whether an agent's title shows its spinner.
+    static func titleSaysWorking(_ title: String) -> Bool {
+        title.unicodeScalars.first.map { (0x2801...0x28FF).contains($0.value) } ?? false
+    }
+
+    /// An agent's title without the spinner or idle mark ("✳") it leads with, which
+    /// the row's dots and status line already say.
+    static func agentTitle(_ title: String) -> String {
+        guard let first = title.unicodeScalars.first,
+              (0x2800...0x28FF).contains(first.value) || "✳✻✽✶✢·".unicodeScalars.contains(first)
+        else { return title }
+        return String(title.unicodeScalars.dropFirst()).trimmingCharacters(in: .whitespaces)
     }
 
     private func checkout(_ dir: String) -> RaptorGitCheckout? {
@@ -191,11 +244,12 @@ final class RaptorSidebarModel: ObservableObject {
     /// back to itself stays at the top. Tabs deeper than `maxDepth` collapse into a
     /// single "…" row.
     ///
-    /// Activity Mode keeps only tabs with an agent or a status; a session left with none
-    /// goes, and a kept tab whose parent went falls back to the next rule, or the top.
+    /// Agents-only mode (`activity`, the eye closed) keeps only tabs running a coding
+    /// agent; a session left with none goes, and a kept tab whose parent went falls back
+    /// to the next rule, or the top.
     static func rows(_ sessions: [Session], activity: Bool) -> [Row] {
         let shown = sessions.map { s in
-            (s, s.tabs.filter { !activity || $0.status != nil || $0.hasAgent })
+            (s, s.tabs.filter { !activity || $0.hasAgent })
         }
         var owner: [String: String] = [:]
         var mainCheckout: [String: String] = [:]
@@ -272,10 +326,11 @@ final class RaptorSidebarModel: ObservableObject {
         return "\(Int(s / 86400))d"
     }
 
-    /// A status as its row's second line: the program's message, else its state.
-    static func statusLine(_ status: RaptorController.SessionView.Status?) -> String {
+    /// A status as its row's second line: the program's message, else (or when the
+    /// message only repeats the row's `title`) its state.
+    static func statusLine(_ status: RaptorController.SessionView.Status?, title: String = "") -> String {
         guard let status else { return "Idle" }
-        if let msg = status.msg, !msg.isEmpty { return msg }
+        if let msg = status.msg, !msg.isEmpty, msg != title { return msg }
         return status.state.prefix(1).uppercased() + status.state.dropFirst()
     }
 }
@@ -338,7 +393,7 @@ struct RaptorSidebar: View {
                 appearance.sidebar = false
             }
             Spacer(minLength: 0)
-            RaptorActivityButton(on: appearance.activity, tokens: tokens) {
+            RaptorActivityButton(open: !appearance.activity, tokens: tokens) {
                 withAnimation(Self.spring) { appearance.activity.toggle() }
             }
         }
@@ -354,7 +409,7 @@ struct RaptorSidebar: View {
                 Toggle("Show All Tabs", isOn: Binding(
                     get: { !appearance.activity },
                     set: { all in withAnimation(Self.spring) { appearance.activity = !all } }))
-                Toggle("Show Activity", isOn: Binding(
+                Toggle("Show Only Agents", isOn: Binding(
                     get: { appearance.activity },
                     set: { on in withAnimation(Self.spring) { appearance.activity = on } }))
             } label: {
@@ -544,25 +599,69 @@ struct RaptorHostPickerRow: View {
     }
 }
 
-/// The eye that turns Activity Mode on and off: an outline, or on a filled circle.
+/// The eye that picks what the sidebar shows: open on a filled circle for every tab,
+/// closing its lid for only the tabs running an agent.
 struct RaptorActivityButton: View {
-    let on: Bool
+    let open: Bool
     let tokens: ThemeTokens
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: "eye")
-                .font(.system(size: 14, weight: on ? .semibold : .regular))
-                .foregroundStyle(on ? .primary : .secondary)
+            RaptorEye(openness: open ? 1 : 0)
+                .frame(width: 18, height: 12)
+                .foregroundStyle(open ? .primary : .secondary)
                 .frame(width: 28, height: 28)
-                .background(Circle().fill(on ? RaptorSidebarRow.raised(tokens) : .clear))
+                .background(Circle().fill(open ? RaptorSidebarRow.raised(tokens) : .clear))
                 .contentShape(Circle())
+                .animation(.easeInOut(duration: 0.25), value: open)
         }
         .buttonStyle(.raptor)
-        .help(on ? "Hide Activity ⇧⌘A" : "Show Activity ⇧⌘A")
-        .accessibilityLabel("Show Activity")
-        .accessibilityAddTraits(on ? [.isButton, .isSelected] : .isButton)
+        .help(open ? "Show Only Agents ⇧⌘A" : "Show All Tabs ⇧⌘A")
+        .accessibilityLabel("Show All Tabs")
+        .accessibilityAddTraits(open ? [.isButton, .isSelected] : .isButton)
+    }
+}
+
+/// An eye whose upper lid closes down onto the lower one as `openness` goes to 0,
+/// leaving a closed eye's curve with three lashes.
+struct RaptorEye: Shape {
+    var openness: CGFloat
+
+    var animatableData: CGFloat {
+        get { openness }
+        set { openness = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let (left, right) = (CGPoint(x: rect.minX + 1, y: rect.midY), CGPoint(x: rect.maxX - 1, y: rect.midY))
+        // A quadratic's control point sits twice as far out as the curve's peak.
+        let lower = rect.midY + rect.height
+        let upper = lower + (rect.minY - rect.height / 2 - lower) * openness
+        var eye = Path()
+        eye.move(to: left)
+        eye.addQuadCurve(to: right, control: CGPoint(x: rect.midX, y: lower))
+        eye.move(to: left)
+        eye.addQuadCurve(to: right, control: CGPoint(x: rect.midX, y: upper))
+        var path = eye.strokedPath(.init(lineWidth: 1.4, lineCap: .round))
+        // The pupil shrinks away behind the closing lid.
+        let r = rect.height * 0.22 * openness
+        path.addEllipse(in: CGRect(x: rect.midX - r, y: rect.midY - r, width: r * 2, height: r * 2))
+        // Lashes grow from the lid's curve as it closes.
+        let lash = (1 - openness) * rect.height * 0.3
+        if lash > 0.1 {
+            var lashes = Path()
+            for dx in [-0.3, 0, 0.3] {
+                let x = rect.midX + rect.width * dx
+                // On the closed curve: y = midY + (height/2)·(1 - (2t-1)²).
+                let t = (x - left.x) / (right.x - left.x)
+                let y = rect.midY + rect.height / 2 * (1 - pow(2 * t - 1, 2))
+                lashes.move(to: CGPoint(x: x, y: y))
+                lashes.addLine(to: CGPoint(x: x + lash * dx * 1.2, y: y + lash))
+            }
+            path.addPath(lashes.strokedPath(.init(lineWidth: 1.2, lineCap: .round)))
+        }
+        return path
     }
 }
 
@@ -609,9 +708,10 @@ struct RaptorSidebarSessionHeader: View {
     }
 }
 
-/// A tab: its program's tile and title, nested under the tab that made it, with a
-/// pulsing "•••" while it works. Activity Mode adds the status line and how long ago
-/// it changed.
+/// A tab: its panes' cards stacked as on the tab strip and its title, nested under the
+/// tab that made it, with a pulsing "•••" while it works. A tab with an agent or a
+/// status adds the status line and how long ago it changed. In agents-only mode the
+/// row speaks for the tab's agent instead: its card in front, its title and status.
 struct RaptorSidebarRow: View {
     let tab: RaptorSidebarModel.Tab
     let branch: RaptorSidebarModel.Branch
@@ -633,12 +733,25 @@ struct RaptorSidebarRow: View {
         tokens.isLight ? .black.opacity(0.1) : .white.opacity(0.08)
     }
 
+    /// What the row draws: the tab's, or in agents-only mode its lead agent's, in front
+    /// of the tab's other agents.
+    private var face: (program: RaptorProgram, others: [RaptorProgram], title: String) {
+        guard activity, let lead = tab.lead else {
+            let title = tab.tab.program.isAgent ? RaptorSidebarModel.agentTitle(tab.tab.title) : tab.tab.title
+            return (tab.tab.program, tab.tab.others, title)
+        }
+        return (lead.program, tab.agents.filter { $0.block != lead.block }.map(\.program), lead.title)
+    }
+
     var body: some View {
-        let height = activity ? RaptorSidebar.activityRowHeight : RaptorSidebar.rowHeight
-        let parts = RaptorTabView.titleParts(tab.tab.title, program: tab.tab.program.name)
+        let twoLine = tab.hasStatusLine
+        let height = twoLine ? RaptorSidebar.activityRowHeight : RaptorSidebar.rowHeight
+        let face = face
+        let parts = RaptorTabView.titleParts(face.title, program: face.program.name)
         HStack(spacing: 8) {
-            RaptorCardFace(program: tab.tab.program, light: tokens.isLight, height: 18)
-                .frame(width: 18, height: 18)
+            RaptorTileCluster(program: face.program, others: face.others, light: tokens.isLight)
+                .fixedSize()
+                .frame(minWidth: 18, alignment: .leading)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
                     (Text(parts.name) + Text(parts.path).foregroundColor(.secondary))
@@ -646,9 +759,9 @@ struct RaptorSidebarRow: View {
                         .fadeTruncated()
                     if tab.isWorking { RaptorWorkingDots() }
                 }
-                if activity {
+                if twoLine {
                     HStack(spacing: 6) {
-                        Text(RaptorSidebarModel.statusLine(tab.status))
+                        Text(RaptorSidebarModel.statusLine(tab.status, title: face.title))
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                             .fadeTruncated()
@@ -669,7 +782,7 @@ struct RaptorSidebarRow: View {
         .padding(.trailing, 14)
         .frame(maxWidth: .infinity, minHeight: height - 3, maxHeight: height - 3, alignment: .leading)
         .background {
-            Self.pill(selected: selected, hovering: hovering, height: height, activity: activity, tokens: tokens)
+            Self.pill(selected: selected, hovering: hovering, height: height, twoLine: twoLine, tokens: tokens)
         }
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
@@ -687,8 +800,8 @@ struct RaptorSidebarRow: View {
     }
 
     @ViewBuilder
-    static func pill(selected: Bool, hovering: Bool, height: CGFloat, activity: Bool, tokens: ThemeTokens) -> some View {
-        let shape = RoundedRectangle(cornerRadius: activity ? 15 : (height - 3) / 2, style: .continuous)
+    static func pill(selected: Bool, hovering: Bool, height: CGFloat, twoLine: Bool, tokens: ThemeTokens) -> some View {
+        let shape = RoundedRectangle(cornerRadius: twoLine ? 15 : (height - 3) / 2, style: .continuous)
         if selected {
             shape.fill(raised(tokens))
                 .overlay(shape.strokeBorder(raisedBorder(tokens), lineWidth: 1))
@@ -698,8 +811,8 @@ struct RaptorSidebarRow: View {
     }
 
     private var accessibilityLabel: String {
-        var label = tab.tab.title
-        if tab.isWorking || activity { label += ", " + RaptorSidebarModel.statusLine(tab.status) }
+        var label = face.title
+        if tab.isWorking || tab.hasStatusLine { label += ", " + RaptorSidebarModel.statusLine(tab.status, title: face.title) }
         return label
     }
 }
@@ -723,7 +836,7 @@ struct RaptorSidebarMore: View {
             .padding(.trailing, 14)
             .frame(maxWidth: .infinity, minHeight: height - 3, maxHeight: height - 3, alignment: .leading)
             .background {
-                RaptorSidebarRow.pill(selected: selected, hovering: false, height: height, activity: activity, tokens: tokens)
+                RaptorSidebarRow.pill(selected: selected, hovering: false, height: height, twoLine: activity, tokens: tokens)
             }
             .padding(.horizontal, RaptorSidebar.selectionInset)
             .frame(height: height)

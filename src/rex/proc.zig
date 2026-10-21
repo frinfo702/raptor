@@ -21,6 +21,9 @@ pub const Info = struct {
     name: ?[]const u8,
     path: ?[]const u8,
     argv0: ?[]const u8,
+    /// The script an interpreter runs ("/usr/local/bin/gemini" for node), which
+    /// names the program when argv[0] is just "node" or "python3".
+    argv1: ?[]const u8,
 };
 
 /// The foreground process group of the terminal behind `pty_fd`. Its
@@ -35,11 +38,13 @@ pub fn foreground(pty_fd: posix.fd_t) ?posix.pid_t {
 pub fn describe(alloc: Allocator, pid: posix.pid_t) Allocator.Error!Info {
     var name_buf: [max_name]u8 = undefined;
     var path_buf: [max_path]u8 = undefined;
+    const args = try argv(alloc, pid);
     return .{
         .pid = pid,
         .name = if (name(pid, &name_buf)) |n| try alloc.dupe(u8, n) else null,
         .path = if (path(pid, &path_buf)) |p| try alloc.dupe(u8, p) else null,
-        .argv0 = try argv0(alloc, pid),
+        .argv0 = args[0],
+        .argv1 = args[1],
     };
 }
 
@@ -78,30 +83,40 @@ pub fn cwd(pid: posix.pid_t, buf: *[max_path]u8) ?[]const u8 {
     return readLink(std.fmt.bufPrintSentinel(&p, "/proc/{d}/cwd", .{pid}, 0) catch unreachable, buf);
 }
 
-/// The process's argv[0], allocated in `alloc`.
-pub fn argv0(alloc: Allocator, pid: posix.pid_t) Allocator.Error!?[]const u8 {
+/// The process's argv[0] and argv[1], allocated in `alloc`.
+pub fn argv(alloc: Allocator, pid: posix.pid_t) Allocator.Error![2]?[]const u8 {
+    var out: [2]?[]const u8 = .{ null, null };
     if (comptime darwin) {
-        // KERN_PROCARGS2 is argc, the exec path, NUL padding, then argv.
+        // KERN_PROCARGS2 is argc, the exec path, NUL padding, then argv, then env.
         var argmax: c_int = 0;
         var len: usize = @sizeOf(c_int);
         const argmax_mib = [_]c_int{ c.CTL.KERN, c.KERN.ARGMAX };
-        if (c.sysctl(&argmax_mib, argmax_mib.len, &argmax, &len, null, 0) != 0 or argmax <= 0) return null;
+        if (c.sysctl(&argmax_mib, argmax_mib.len, &argmax, &len, null, 0) != 0 or argmax <= 0) return out;
         const buf = try alloc.alloc(u8, @intCast(argmax));
         defer alloc.free(buf);
         len = buf.len;
         const mib = [_]c_int{ c.CTL.KERN, c.KERN.PROCARGS2, pid };
-        if (c.sysctl(&mib, mib.len, buf.ptr, &len, null, 0) != 0 or len <= @sizeOf(c_int)) return null;
+        if (c.sysctl(&mib, mib.len, buf.ptr, &len, null, 0) != 0 or len <= @sizeOf(c_int)) return out;
+        const argc = std.mem.readInt(c_int, buf[0..@sizeOf(c_int)], builtin.cpu.arch.endian());
         var rest: []const u8 = buf[@sizeOf(c_int)..len];
-        rest = rest[(std.mem.indexOfScalar(u8, rest, 0) orelse return null)..];
+        rest = rest[(std.mem.indexOfScalar(u8, rest, 0) orelse return out)..];
         rest = std.mem.trimStart(u8, rest, "\x00");
-        const arg = std.mem.sliceTo(rest, 0);
-        return if (arg.len > 0) try alloc.dupe(u8, arg) else null;
+        for (0..@min(2, @max(argc, 0))) |i| {
+            const arg = std.mem.sliceTo(rest, 0);
+            if (arg.len > 0) out[i] = try alloc.dupe(u8, arg);
+            rest = rest[@min(rest.len, arg.len + 1)..];
+        }
+        return out;
     }
     var p: [32]u8 = undefined;
     var buf: [max_path]u8 = undefined;
-    const cmdline = readFile(std.fmt.bufPrintSentinel(&p, "/proc/{d}/cmdline", .{pid}, 0) catch unreachable, &buf) orelse return null;
-    const arg = std.mem.sliceTo(cmdline, 0);
-    return if (arg.len > 0) try alloc.dupe(u8, arg) else null;
+    const cmdline = readFile(std.fmt.bufPrintSentinel(&p, "/proc/{d}/cmdline", .{pid}, 0) catch unreachable, &buf) orelse return out;
+    var it = std.mem.splitScalar(u8, cmdline, 0);
+    for (&out) |*o| {
+        const arg = it.next() orelse break;
+        if (arg.len > 0) o.* = try alloc.dupe(u8, arg);
+    }
+    return out;
 }
 
 /// Up to `buf.len` bytes of a file.

@@ -96,6 +96,15 @@ struct RaptorCardStackTests {
         #expect(RaptorProgram.processName("2.1.299", argv0: nil) == "2.1.299")
         #expect(RaptorProgram.processName(nil, argv0: nil) == nil)
     }
+
+    /// Agents run by an interpreter go by the script it runs; other scripts don't.
+    @Test func interpretedAgentsGoByTheirScript() {
+        #expect(RaptorProgram.processName("node", argv0: "node", argv1: "/opt/homebrew/bin/gemini") == "gemini")
+        #expect(RaptorProgram.processName("node", argv0: "/opt/homebrew/bin/node", argv1: "/Users/me/.npm/bin/pi") == "pi")
+        #expect(RaptorProgram.processName("python3.12", argv0: "python3", argv1: "/Users/me/.local/bin/aider") == "aider")
+        #expect(RaptorProgram.processName("node", argv0: "node", argv1: "server.js") == "node")
+        #expect(RaptorProgram.processName("cat", argv0: "cat", argv1: "claude") == "cat")
+    }
 }
 
 /// Tab titles draw the program's name, then its directory dimmer.
