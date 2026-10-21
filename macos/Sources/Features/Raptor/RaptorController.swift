@@ -429,7 +429,9 @@ class RaptorController: BaseTerminalController {
     // MARK: Actions
 
     func newTab() {
-        client.send("session.new_window", ["session": session])
+        var params = ["session": session]
+        params["cwd"] = RaptorSettings.newPaneDirectory(on: client)
+        client.send("session.new_window", params)
     }
 
     func split(_ surface: Ghostty.SurfaceView, _ direction: SplitTree<Ghostty.SurfaceView>.NewDirection) {
@@ -484,7 +486,9 @@ class RaptorController: BaseTerminalController {
         guard let block = surfaces.first(where: { $0.value === oldView })?.key else { return nil }
         // ponytail: the server splits only right and down; left and up map onto them.
         let dir = direction == .right || direction == .left ? "right" : "down"
-        client.send("session.new_split", ["session": session, "block": block, "direction": dir])
+        var params = ["session": session, "block": block, "direction": dir]
+        params["cwd"] = RaptorSettings.newPaneDirectory(on: client)
+        client.send("session.new_split", params)
         return nil
     }
 

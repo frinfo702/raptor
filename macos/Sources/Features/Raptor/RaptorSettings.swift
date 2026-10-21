@@ -16,13 +16,49 @@ enum RaptorSettings {
         }
         window?.makeKeyAndOrderFront(nil)
     }
+
+    private static let newPaneDirectoriesKey = "RaptorNewPaneDirectories"
+
+    /// The directory new panes and tabs start in on each machine, by its host ("" for
+    /// this Mac). A machine without one starts them where the pane they come from is.
+    static var newPaneDirectories: [String: String] {
+        get { UserDefaults.standard.dictionary(forKey: newPaneDirectoriesKey) as? [String: String] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: newPaneDirectoriesKey) }
+    }
+
+    /// Where new panes and tabs start on the server's machine; nil starts them where the
+    /// pane they come from is.
+    static func newPaneDirectory(on server: RaptorClient) -> String? {
+        newPaneDirectories[server.host ?? ""].map { $0.isEmpty ? "/" : $0 }
+    }
 }
 
 struct RaptorSettingsView: View {
     @ObservedObject var appearance: RaptorAppearance
+    @ObservedObject private var servers = RaptorClient.Servers.shared
+    @State private var directories = RaptorSettings.newPaneDirectories
 
     var body: some View {
         Form {
+            Section("New Panes and Tabs") {
+                ForEach(servers.clients) { server in
+                    let host = server.host ?? ""
+                    Picker(server.name, selection: Binding(
+                        get: { directories[host] != nil },
+                        set: { directories[host] = $0 ? "/" : nil }
+                    )) {
+                        Text("Current directory").tag(false)
+                        Text("Directory").tag(true)
+                    }
+                    if let dir = directories[host] {
+                        TextField("Directory", text: Binding(
+                            get: { dir },
+                            set: { directories[host] = $0 }
+                        ), prompt: Text("/"))
+                    }
+                }
+            }
+            .onChange(of: directories) { RaptorSettings.newPaneDirectories = $0 }
             Section("Appearance") {
                 Picker("Interface style", selection: $appearance.style) {
                     ForEach(RaptorAppearance.Style.allCases.filter { $0 != .glass || RaptorAppearance.glassAvailable }) {

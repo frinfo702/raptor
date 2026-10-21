@@ -1520,8 +1520,10 @@ fn freePane(self: *Server, pane: *Pane) void {
 }
 
 /// Start a block in session `s` from the request's `command`, `cwd`,
-/// `cols`, and `rows`. It belongs to no window yet.
-fn spawnPane(self: *Server, s: *Session, req: *Request) Error!*Pane {
+/// `cols`, and `rows`. It belongs to no window yet. Without a `cwd` it
+/// starts where `from`'s foreground program is, as Ghostty's new splits
+/// and tabs do.
+fn spawnPane(self: *Server, s: *Session, req: *Request, from: ?*Pane) Error!*Pane {
     const pane = try self.alloc.create(Pane);
     errdefer self.alloc.destroy(pane);
     pane.* = .{ .server = self, .id = ids.uuidv7(self.io), .session_id = s.id };
@@ -1547,7 +1549,15 @@ fn spawnPane(self: *Server, s: *Session, req: *Request) Error!*Pane {
     // The user's shell starts as a login shell, as in Ghostty; a given
     // command runs as is.
     const args = if (given == null) try shell.login(req.arena, integrated) else integrated;
-    const cwd = if (req.str("cwd")) |p| try req.arena.dupeSentinel(u8, p, 0) else s.cwd orelse
+    var buf: [proc.max_path]u8 = undefined;
+    const inherited = if (from) |f| paneCwd(f, &buf) else null;
+    const given_cwd = if (req.str("cwd")) |p| home: {
+        // A path the user typed may start from their home directory.
+        if (!std.mem.eql(u8, p, "~") and !std.mem.startsWith(u8, p, "~/")) break :home p;
+        const h = self.env.get("HOME") orelse break :home p;
+        break :home try std.fs.path.resolveAlloc(req.arena, &.{ h, p[@min(p.len, 2)..] });
+    } else null;
+    const cwd = if (given_cwd orelse inherited) |p| try req.arena.dupeSentinel(u8, p, 0) else s.cwd orelse
         if (self.env.get("HOME")) |h| try req.arena.dupeSentinel(u8, h, 0) else null;
 
     // Starting the block forks the server.
@@ -1568,7 +1578,7 @@ fn spawnPane(self: *Server, s: *Session, req: *Request) Error!*Pane {
 
 /// Open a window with one new block in session `s`.
 fn newWindow(self: *Server, s: *Session, req: *Request, label: ?[]const u8) Error!*Window {
-    const pane = try self.spawnPane(s, req);
+    const pane = try self.spawnPane(s, req, if (s.active) |a| a.focused else null);
     errdefer {
         pane.block.kill();
         self.dying.append(self.alloc, pane) catch {};
@@ -2156,7 +2166,7 @@ fn sessionNewSplit(self: *Server, req: *Request, w: *Stringify) Error!void {
         if (std.mem.eql(u8, d, "down")) break :dir .vertical;
         return req.fail(error.Usage, "direction must be right or down", .{});
     };
-    const pane = try self.spawnPane(t.session, req);
+    const pane = try self.spawnPane(t.session, req, t.pane);
     t.window.tree.split(self.alloc, t.pane, pane, dir) catch |err| {
         pane.block.kill();
         self.dying.append(self.alloc, pane) catch {};
@@ -2455,10 +2465,15 @@ fn resolvePath(self: *Server, pane: *Pane, req: *Request, path: []const u8) Erro
         return try std.fs.path.resolveAlloc(req.arena, &.{ home, path[@min(path.len, 2)..] });
     }
     var buf: [proc.max_path]u8 = undefined;
-    const fg = proc.foreground(pane.block.pty.master) orelse pane.block.pid;
-    const cwd = proc.cwd(fg, &buf) orelse proc.cwd(pane.block.pid, &buf) orelse
+    const cwd = paneCwd(pane, &buf) orelse
         return req.fail(error.Fail, "the block's working directory is unknown", .{});
     return try std.fs.path.resolveAlloc(req.arena, &.{ cwd, path });
+}
+
+/// The working directory of the block's foreground program, else of the block.
+fn paneCwd(pane: *Pane, buf: *[proc.max_path]u8) ?[]const u8 {
+    const fg = proc.foreground(pane.block.pty.master) orelse pane.block.pid;
+    return proc.cwd(fg, buf) orelse proc.cwd(pane.block.pid, buf);
 }
 
 fn methodSize(pane: *Pane, _: *Request, w: *Stringify) Error!void {
@@ -2784,6 +2799,37 @@ test "rex Server: foreground process, list_dir, and program status" {
     );
     defer alloc.free(missing);
     try testing.expect(T.has(missing, "\"code\":\"fail\""));
+
+    // A split starts where the pane it splits is, not where the session began.
+    const moved = try T.call(fd,
+        \\{"id":51,"method":"session.new_split","params":{"session":"chrome","command":["/bin/sh","-c","cd a && exec sleep 30"]}}
+    );
+    defer alloc.free(moved);
+    const moved_parsed = try std.json.parseFromSlice(std.json.Value, alloc, moved, .{});
+    defer moved_parsed.deinit();
+    const moved_block = moved_parsed.value.object.get("result").?.object.get("block").?.string;
+    const poll = try std.fmt.allocPrint(alloc,
+        \\{{"id":52,"method":"block.method","params":{{"block":"{s}","method":"process"}}}}
+    , .{moved_block});
+    defer alloc.free(poll);
+    var tries: usize = 0;
+    while (true) : (tries += 1) {
+        const p = try T.call(fd, poll);
+        defer alloc.free(p);
+        if (T.has(p, "\"name\":\"sleep\"")) break;
+        if (tries == 200) return error.TestUnexpectedResult;
+        try std.Io.sleep(io, .fromMilliseconds(10), .awake);
+    }
+    const inherited = try std.fmt.allocPrint(alloc,
+        \\{{"id":53,"method":"session.new_split","params":{{"block":"{s}","command":["/bin/sh","-c","exec sleep 30"]}}}}
+    , .{moved_block});
+    defer alloc.free(inherited);
+    alloc.free(try T.call(fd, inherited));
+    const inner = try T.call(fd,
+        \\{"id":54,"method":"block.method","params":{"session":"chrome","method":"list_dir"}}
+    );
+    defer alloc.free(inner);
+    try testing.expect(T.has(inner, "/a\",\"entries\":[{\"name\":\"b\","));
 
     const view = try T.call(fd,
         \\{"id":6,"method":"session.view","params":{"session":"chrome"}}
