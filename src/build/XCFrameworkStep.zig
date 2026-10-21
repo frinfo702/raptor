@@ -45,7 +45,14 @@ pub fn create(b: *std.Build, opts: Options) *XCFrameworkStep {
 
     const run = RunStep.create(b, b.fmt("xcframework {s}", .{opts.name}));
     run.has_side_effects = true;
-    run.addArgs(&.{ "xcodebuild", "-create-xcframework" });
+    // xcodebuild refuses to overwrite an existing output, which a cached
+    // output path from a previous run is, so remove the last argument first.
+    run.addArgs(&.{
+        "/bin/sh",
+        "-c",
+        "for out; do :; done; rm -rf \"$out\" && exec \"$0\" -create-xcframework \"$@\"",
+        "xcodebuild",
+    });
     for (opts.libraries) |lib| {
         run.addArg("-library");
         run.addFileArg(lib.library);
