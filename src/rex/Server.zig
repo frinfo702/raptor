@@ -1619,8 +1619,8 @@ fn parentBlock(self: *Server, req: *Request) Error!?ids.Uuid {
 fn closePane(self: *Server, pane: *Pane) void {
     const w = pane.window orelse return;
     if (w.tree.count() == 1) return self.closeWindow(w);
+    if (w.focused == pane) w.focused = w.tree.heir(pane);
     w.tree.remove(self.alloc, pane);
-    if (w.focused == pane) w.focused = w.tree.first();
     if (w.zoomed == pane) w.zoomed = null;
     self.retirePane(pane);
     self.viewChanged(w.session);

@@ -88,6 +88,27 @@ pub fn Tree(comptime Leaf: type) type {
             if (s.b.* == .split) removeFrom(alloc, s.b, leaf);
         }
 
+        /// The leaf to focus once `leaf` is removed: the one in its sibling
+        /// that borders it, preferring the top or left one along the other
+        /// axis. `leaf` must not be the root.
+        pub fn heir(self: Self, leaf: Leaf) Leaf {
+            var node = self.root;
+            while (true) {
+                const s = node.split;
+                const in_a = find(s.a, leaf) != null;
+                const child = if (in_a) s.a else s.b;
+                if (child.* == .split) {
+                    node = child;
+                    continue;
+                }
+                // The sibling sits after `leaf` if `leaf` is in `a`, so its
+                // bordering leaves are on its first side, else its last.
+                var n = if (in_a) s.b else s.a;
+                while (n.* == .split) n = if (!in_a and n.split.dir == s.dir) n.split.b else n.split.a;
+                return n.leaf;
+            }
+        }
+
         /// Move `leaf` beside `target`, splitting the target's space in two
         /// with `leaf` first if `before`, else second.
         pub fn move(self: *Self, alloc: Allocator, leaf: Leaf, target: Leaf, dir: Dir, before: bool) !void {
@@ -244,8 +265,36 @@ test "rex layout: split, remove, and order" {
     try testing.expectError(error.NotFound, t.resize(1, 9, 0.5));
 
     // Removing a leaf gives its space to its sibling.
+    // Here the tree is (1 | 3) above 2.
+    try testing.expectEqual(1, t.heir(2));
+    try testing.expectEqual(1, t.heir(3));
+    try testing.expectEqual(3, t.heir(1));
     t.remove(alloc, 3);
     t.remove(alloc, 2);
     try testing.expectEqual(1, t.count());
     try testing.expect(t.root.* == .leaf and t.root.leaf == 1);
+}
+
+test "rex layout: heir borders the removed leaf" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var t = try Tree(u8).init(alloc, 1);
+    defer t.deinit(alloc);
+
+    // (1 | 2) | 3: closing the right pane goes to the middle one.
+    try t.split(alloc, 1, 3, .horizontal);
+    try t.split(alloc, 1, 2, .horizontal);
+    try testing.expectEqual(2, t.heir(3));
+    try testing.expectEqual(2, t.heir(1));
+    try testing.expectEqual(1, t.heir(2));
+
+    // (1 | 2) | (3 above 4): closing 4 goes up, closing 3 goes down.
+    try t.split(alloc, 3, 4, .vertical);
+    try testing.expectEqual(3, t.heir(4));
+    try testing.expectEqual(4, t.heir(3));
+
+    // (1 | (2 above 5)) | 3: closing 3 goes to the top pane beside it.
+    t.remove(alloc, 4);
+    try t.split(alloc, 2, 5, .vertical);
+    try testing.expectEqual(2, t.heir(3));
 }
